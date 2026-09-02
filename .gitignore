@@ -1,8 +1,0 @@
-bin/
-obj/
-*.user
-logs/
-workspace/
-.vs/
-.vscode/
-appsettings.*.local.json
