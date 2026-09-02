@@ -1,0 +1,15 @@
+@{
+    ViewData["Title"] = "Login";
+}
+<h1 class="panel-title">Sign In</h1>
+<section class="panel" style="max-width:360px">
+    <form method="post">
+        @Html.AntiForgeryToken()
+        <div class="metric-row"><label for="Email">Email</label></div>
+        <input class="console-input" type="email" id="Email" name="Email" required />
+        <div class="metric-row"><label for="Password">Password</label></div>
+        <input class="console-input" type="password" id="Password" name="Password" required />
+        <button class="console-btn" type="submit" style="margin-top:16px">Sign In</button>
+    </form>
+    <p style="margin-top:12px"><a asp-controller="Account" asp-action="Register">Create an account</a></p>
+</section>

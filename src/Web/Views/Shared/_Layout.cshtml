@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] — AI Core</title>
+    <link rel="stylesheet" href="~/css/app.css" />
+    <link rel="stylesheet" href="~/css/console.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+</head>
+<body>
+    <div class="console-shell">
+        <aside class="console-nav">
+            <div class="console-nav__brand">AI&nbsp;CORE</div>
+            <nav>
+                <a asp-controller="Dashboard" asp-action="Index" class="console-nav__link">Dashboard</a>
+                <a asp-controller="ModelManager" asp-action="Index" class="console-nav__link">Model Manager</a>
+                <a asp-controller="TokenMonitor" asp-action="Index" class="console-nav__link">Token Monitor</a>
+                <a asp-controller="Settings" asp-action="Index" class="console-nav__link">Settings</a>
+                <a href="/api/agent/sessions" class="console-nav__link">Agent Sessions (JSON)</a>
+                <a href="/health" class="console-nav__link">Health</a>
+            </nav>
+        </aside>
+        <main class="console-main">
+            @RenderBody()
+        </main>
+    </div>
+    <script src="~/js/app.js"></script>
+    @await RenderSectionAsync("Scripts", required: false)
+</body>
+</html>

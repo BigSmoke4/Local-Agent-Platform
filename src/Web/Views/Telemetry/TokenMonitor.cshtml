@@ -1,0 +1,41 @@
+@model Platform.Web.Controllers.TokenMonitorViewModel
+@{
+    ViewData["Title"] = "Token Monitor";
+}
+
+<h1 class="panel-title">Token Monitor</h1>
+
+<div class="panel-grid">
+    <section class="panel">
+        <h2 class="panel__header">TOTALS (LAST 50 SESSIONS)</h2>
+        <div class="metric-row"><span>Input Tokens</span><strong>@Model.TotalInputTokens</strong></div>
+        <div class="metric-row"><span>Output Tokens</span><strong>@Model.TotalOutputTokens</strong></div>
+        <div class="metric-row"><span>Avg Output / Session</span><strong>@Model.AverageOutputTokensPerSession.ToString("F1")</strong></div>
+    </section>
+
+    <section class="panel panel--wide">
+        <h2 class="panel__header">RECENT SESSIONS</h2>
+        @if (Model.RecentSessions.Any())
+        {
+            <table class="panel__table">
+                <thead><tr><th>Time (UTC)</th><th>State</th><th>Input</th><th>Output</th><th>Cached</th></tr></thead>
+                <tbody>
+                @foreach (var s in Model.RecentSessions)
+                {
+                    <tr>
+                        <td>@s.CreatedAtUtc.ToString("u")</td>
+                        <td>@s.State</td>
+                        <td>@s.InputTokens</td>
+                        <td>@s.OutputTokens</td>
+                        <td>@s.CachedTokens</td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        }
+        else
+        {
+            <p class="panel__empty">No agent sessions yet.</p>
+        }
+    </section>
+</div>
