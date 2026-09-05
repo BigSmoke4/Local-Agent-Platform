@@ -1,0 +1,76 @@
+@model IReadOnlyList<RepositoryRowViewModel>
+@{
+    ViewData["Title"] = "Repositories";
+    var projects = (IReadOnlyList<LocalAgentPlatform.Shared.Data.Entities.Project>)ViewBag.Projects;
+}
+
+@if (TempData["RepoError"] is string err)
+{
+    <section class="panel"><div class="panel__row"><span class="status-fail">Error</span><span>@err</span></div></section>
+}
+@if (TempData["RepoInfo"] is string info)
+{
+    <section class="panel"><div class="panel__row"><span class="status-ok">Info</span><span>@info</span></div></section>
+}
+
+<section class="panel">
+    <h2 class="panel__title">CREATE PROJECT</h2>
+    <form method="post" asp-action="CreateProject" class="inline-form">
+        <input type="text" name="name" placeholder="Project name" required />
+        <button type="submit" class="btn-small">Create</button>
+    </form>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title">REGISTER REPOSITORY</h2>
+    @if (!projects.Any())
+    {
+        <p>Create a project first.</p>
+    }
+    else
+    {
+        <form method="post" asp-action="Register">
+            <select name="projectId" required>
+                @foreach (var p in projects)
+                {
+                    <option value="@p.Id">@p.Name</option>
+                }
+            </select>
+            <input type="text" name="localPath" placeholder="/absolute/path/to/repo" required style="width: 320px;" />
+            <button type="submit" class="btn-small">Register</button>
+        </form>
+    }
+</section>
+
+<section class="panel">
+    <h2 class="panel__title">REGISTERED REPOSITORIES</h2>
+    <table class="data-table">
+        <thead>
+            <tr><th>Project</th><th>Path</th><th>Last Indexed</th><th>Last Job Status</th><th>Files</th><th>Symbols</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+        @foreach (var r in Model)
+        {
+            <tr>
+                <td>@r.ProjectName</td>
+                <td>@r.LocalPath</td>
+                <td>@(r.LastIndexedAtUtc?.ToString("u") ?? "Never")</td>
+                <td>@(r.LatestJobStatus ?? "—")</td>
+                <td>@r.FileCount</td>
+                <td>@r.SymbolCount</td>
+                <td class="actions-cell">
+                    <form method="post" asp-action="TriggerIndex" class="inline-form">
+                        <input type="hidden" name="repositoryId" value="@r.Id" />
+                        <button type="submit" class="btn-small">Index Now</button>
+                    </form>
+                    <a class="btn-small" asp-action="Symbols" asp-route-repositoryId="@r.Id">View Symbols</a>
+                </td>
+            </tr>
+        }
+        @if (!Model.Any())
+        {
+            <tr><td colspan="7">No repositories registered yet.</td></tr>
+        }
+        </tbody>
+    </table>
+</section>

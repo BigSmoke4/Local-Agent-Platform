@@ -1,0 +1,52 @@
+@model IReadOnlyList<LocalAgentPlatform.Shared.Data.Entities.ApiKey>
+@{ ViewData["Title"] = "API Keys"; }
+
+@if (TempData["NewApiKey"] is string rawKey)
+{
+    <section class="panel">
+        <h2 class="panel__title">NEW KEY CREATED — COPY IT NOW</h2>
+        <p style="font-size:0.8rem; color:var(--text-muted);">This is shown once. It is not stored in plaintext and cannot be retrieved again.</p>
+        <code style="display:block; padding:0.5rem; background:#0a0e14; border:1px solid var(--panel-border); word-break:break-all;">@rawKey</code>
+        <p style="font-size:0.8rem; margin-top:0.5rem;">Use it as: <code>X-Api-Key: @rawKey</code></p>
+    </section>
+}
+
+<section class="panel">
+    <h2 class="panel__title">CREATE API KEY</h2>
+    <form method="post" asp-action="Create" style="display:flex; gap:0.5rem;">
+        <input type="text" name="name" placeholder="Key name (e.g. 'my laptop')" style="flex:1;" />
+        <button type="submit" class="btn-small">Create</button>
+    </form>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title">YOUR API KEYS</h2>
+    <table class="data-table">
+        <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Last Used</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+        @foreach (var k in Model)
+        {
+            <tr>
+                <td>@k.Name</td>
+                <td>@k.KeyPrefix…</td>
+                <td>@k.CreatedAtUtc.ToString("u")</td>
+                <td>@(k.LastUsedAtUtc?.ToString("u") ?? "never")</td>
+                <td class="@(k.RevokedAtUtc is null ? "status-ok" : "status-fail")">@(k.RevokedAtUtc is null ? "ACTIVE" : "REVOKED")</td>
+                <td>
+                    @if (k.RevokedAtUtc is null)
+                    {
+                        <form method="post" asp-action="Revoke" onsubmit="return confirm('Revoke this key?');">
+                            <input type="hidden" name="id" value="@k.Id" />
+                            <button type="submit" class="btn-small btn-danger">Revoke</button>
+                        </form>
+                    }
+                </td>
+            </tr>
+        }
+        @if (!Model.Any())
+        {
+            <tr><td colspan="6">No API keys yet.</td></tr>
+        }
+        </tbody>
+    </table>
+</section>

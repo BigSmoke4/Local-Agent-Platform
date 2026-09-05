@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>LocalAgentPlatform.Web</RootNamespace>
+    <UserSecretsId>localagentplatform-dev</UserSecretsId>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.8">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="AspNetCore.HealthChecks.NpgSql" Version="8.0.1" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.9.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.9.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.9.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.Console" Version="1.9.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.2" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Shared\Kernel\Shared.Kernel.csproj" />
+    <ProjectReference Include="..\Shared\Data\Shared.Data.csproj" />
+    <ProjectReference Include="..\Modules\Models\Infrastructure\Models.Infrastructure.csproj" />
+    <ProjectReference Include="..\Modules\Models\Application\Models.Application.csproj" />
+    <ProjectReference Include="..\Modules\RepositoryAnalysis\Application\RepositoryAnalysis.Application.csproj" />
+    <ProjectReference Include="..\Modules\RepositoryAnalysis\Infrastructure\RepositoryAnalysis.Infrastructure.csproj" />
+    <ProjectReference Include="..\Modules\Tools\Application\Tools.Application.csproj" />
+    <ProjectReference Include="..\Modules\Tools\Infrastructure\Tools.Infrastructure.csproj" />
+    <ProjectReference Include="..\Modules\Agent\Application\Agent.Application.csproj" />
+    <ProjectReference Include="..\Modules\Verification\Application\Verification.Application.csproj" />
+    <ProjectReference Include="..\Modules\Verification\Infrastructure\Verification.Infrastructure.csproj" />
+    <ProjectReference Include="..\Modules\Memory\Application\Memory.Application.csproj" />
+    <ProjectReference Include="..\Modules\IdeIntegration\Domain\IdeIntegration.Domain.csproj" />
+  </ItemGroup>
+</Project>

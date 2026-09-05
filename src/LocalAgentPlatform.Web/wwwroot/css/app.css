@@ -1,0 +1,149 @@
+:root {
+    --console-bg: #0d1117;
+    --panel-bg: #161b22;
+    --panel-border: #2a3038;
+    --text-primary: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #3fb950;
+    --danger: #f85149;
+    font-family: "JetBrains Mono", "Consolas", monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--console-bg);
+    color: var(--text-primary);
+}
+
+.console-header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--panel-border);
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+}
+.console-header__title { font-weight: 700; letter-spacing: 0.1em; }
+.console-header__subtitle { color: var(--text-muted); font-size: 0.85rem; }
+
+.console-main { padding: 1.5rem; }
+
+.panel-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1rem;
+}
+
+.panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 4px;
+    padding: 1rem;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 2px 6px rgba(0,0,0,0.4);
+}
+
+.panel__title {
+    font-size: 0.8rem;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin: 0 0 0.75rem 0;
+}
+
+.panel__row {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.25rem 0;
+    border-bottom: 1px dashed var(--panel-border);
+    font-size: 0.9rem;
+}
+.panel__row:last-child { border-bottom: none; }
+
+.status-ok { color: var(--accent); }
+.status-fail { color: var(--danger); }
+
+.model-list { list-style: none; padding: 0; margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--text-muted); }
+
+.status-warn { color: #d29922; }
+
+.console-nav {
+    display: flex;
+    gap: 1rem;
+    padding: 0 1.5rem;
+    border-bottom: 1px solid var(--panel-border);
+    background: #0a0e14;
+}
+.console-nav a {
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.8rem;
+    letter-spacing: 0.05em;
+    padding: 0.6rem 0;
+}
+.console-nav a:hover, .console-nav a.active { color: var(--text-primary); border-bottom: 2px solid var(--accent); }
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.data-table th {
+    text-align: left;
+    color: var(--text-muted);
+    font-weight: 500;
+    border-bottom: 1px solid var(--panel-border);
+    padding: 0.4rem 0.5rem;
+}
+.data-table td {
+    padding: 0.4rem 0.5rem;
+    border-bottom: 1px dashed var(--panel-border);
+}
+
+.actions-cell { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.inline-form { display: inline; }
+
+.btn-small {
+    background: #21262d;
+    color: var(--text-primary);
+    border: 1px solid var(--panel-border);
+    border-radius: 3px;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    font-family: inherit;
+}
+.btn-small:hover { border-color: var(--accent); }
+.btn-danger:hover { border-color: var(--danger); color: var(--danger); }
+
+/* ---- Neural navigation (Section 27) ---- */
+.neural-nav {
+    padding: 0.5rem 1rem 0;
+    background: #0a0e14;
+    border-bottom: 1px solid var(--panel-border);
+}
+.neural-nav__svg { width: 100%; height: 140px; display: block; }
+.neural-node circle {
+    fill: var(--panel-bg);
+    stroke: var(--panel-border);
+    stroke-width: 1.5px;
+    transition: stroke 0.15s ease, fill 0.15s ease;
+}
+.neural-node text {
+    fill: var(--text-muted);
+    font-size: 11px;
+    font-family: inherit;
+    pointer-events: none;
+}
+.neural-node:hover circle, .neural-node--active circle {
+    stroke: var(--accent);
+    fill: #1a2233;
+}
+.neural-node--active text, .neural-node:hover text { fill: var(--text-primary); }
+.neural-node--core circle { fill: #1a2233; stroke: var(--accent); stroke-width: 2px; }
+.neural-node--core text { fill: var(--accent); font-weight: 700; }
+.neural-nav a { text-decoration: none; }
+
+/* Respect reduced-motion preference: no transitions/animation at all (Section 53) */
+@media (prefers-reduced-motion: reduce) {
+    .neural-node circle { transition: none; }
+}

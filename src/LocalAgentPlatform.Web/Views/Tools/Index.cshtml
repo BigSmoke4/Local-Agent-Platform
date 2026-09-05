@@ -1,0 +1,186 @@
+@model ToolsIndexViewModel
+@{
+    ViewData["Title"] = "Tool Console";
+    string decision = TempData["ToolOutcomeDecision"] as string ?? "";
+}
+
+@if (!string.IsNullOrEmpty(decision))
+{
+    <section class="panel">
+        <h2 class="panel__title">LAST INVOCATION — @TempData["ToolOutcomeToolName"]</h2>
+        <div class="panel__row">
+            <span>Decision</span>
+            <span class="@(decision == "Allowed" ? "status-ok" : decision == "Denied" ? "status-fail" : "status-warn")">@decision</span>
+        </div>
+        @if (TempData["ToolOutcomeReason"] is string reason && !string.IsNullOrEmpty(reason))
+        {
+            <div class="panel__row"><span>Reason</span><span>@reason</span></div>
+        }
+        @if (decision == "PendingApproval")
+        {
+            @{
+                var paramsJson = TempData["ToolOutcomeParametersJson"] as string;
+                var restoredParams = string.IsNullOrEmpty(paramsJson)
+                    ? new Dictionary<string, string>()
+                    : System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(paramsJson)!;
+                var hasCommand = restoredParams.ContainsKey("command");
+            }
+            <form method="post" asp-action="Invoke" style="margin-top:0.5rem; display:inline-block;">
+                <input type="hidden" name="toolName" value="@TempData["ToolOutcomeToolName"]" />
+                <input type="hidden" name="repositoryId" value="@TempData["ToolOutcomeRepositoryId"]" />
+                <input type="hidden" name="approved" value="true" />
+                @foreach (var kv in restoredParams)
+                {
+                    <input type="hidden" name="@kv.Key" value="@kv.Value" />
+                }
+                <button type="submit" class="btn-small" style="border-color: var(--danger);">Approve &amp; Run (once)</button>
+            </form>
+            @if (hasCommand)
+            {
+                <form method="post" asp-action="Invoke" style="margin-top:0.5rem; display:inline-block; margin-left:0.4rem;">
+                    <input type="hidden" name="toolName" value="@TempData["ToolOutcomeToolName"]" />
+                    <input type="hidden" name="repositoryId" value="@TempData["ToolOutcomeRepositoryId"]" />
+                    <input type="hidden" name="approved" value="true" />
+                    <input type="hidden" name="persist" value="AlwaysAllow" />
+                    @foreach (var kv in restoredParams)
+                    {
+                        <input type="hidden" name="@kv.Key" value="@kv.Value" />
+                    }
+                    <button type="submit" class="btn-small">Always Allow this executable</button>
+                </form>
+                <form method="post" asp-action="Invoke" style="margin-top:0.5rem; display:inline-block; margin-left:0.4rem;">
+                    <input type="hidden" name="toolName" value="@TempData["ToolOutcomeToolName"]" />
+                    <input type="hidden" name="repositoryId" value="@TempData["ToolOutcomeRepositoryId"]" />
+                    <input type="hidden" name="approved" value="false" />
+                    <input type="hidden" name="persist" value="AlwaysDeny" />
+                    @foreach (var kv in restoredParams)
+                    {
+                        <input type="hidden" name="@kv.Key" value="@kv.Value" />
+                    }
+                    <button type="submit" class="btn-small btn-danger">Always Deny this executable</button>
+                </form>
+            }
+        }
+        @if (TempData["ToolOutcomeOutput"] is string output && !string.IsNullOrEmpty(output))
+        {
+            <pre style="white-space:pre-wrap; font-size:0.8rem; margin-top:0.5rem; max-height:300px; overflow:auto;">@output</pre>
+        }
+        @if (TempData["ToolOutcomeError"] is string err && !string.IsNullOrEmpty(err))
+        {
+            <pre style="white-space:pre-wrap; font-size:0.8rem; color: var(--danger); max-height:200px; overflow:auto;">@err</pre>
+        }
+    </section>
+}
+
+<section class="panel">
+    <h2 class="panel__title">RUN A TOOL</h2>
+    @if (!Model.Repositories.Any())
+    {
+        <p>Register a repository first (see the Repositories page).</p>
+    }
+    else
+    {
+        <form method="post" asp-action="Invoke">
+            <input type="hidden" name="approved" value="false" />
+            <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.5rem;">
+                <select name="toolName" required>
+                    @foreach (var t in Model.Tools)
+                    {
+                        <option value="@t.Name">@t.Name (@t.RiskLevel)</option>
+                    }
+                </select>
+                <select name="repositoryId" required>
+                    @foreach (var r in Model.Repositories)
+                    {
+                        <option value="@r.Id">@r.LocalPath</option>
+                    }
+                </select>
+            </div>
+            <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.5rem;">
+                <input type="text" name="path" placeholder="path (FileRead/Write/Edit/DirectoryList)" style="width:260px;" />
+                <input type="text" name="command" placeholder="command (TerminalTool)" style="width:260px;" />
+                <input type="text" name="subcommand" placeholder="subcommand (GitTool, e.g. 'status')" style="width:200px;" />
+                <input type="text" name="target" placeholder="target (Build/TestTool, default '.')" style="width:200px;" />
+            </div>
+            <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.5rem;">
+                <textarea name="content" placeholder="content (FileWriteTool)" rows="2" style="width:100%;"></textarea>
+            </div>
+            <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.5rem;">
+                <textarea name="oldText" placeholder="oldText (FileEditTool)" rows="2" style="width:49%;"></textarea>
+                <textarea name="newText" placeholder="newText (FileEditTool)" rows="2" style="width:49%;"></textarea>
+            </div>
+            <button type="submit" class="btn-small">Run</button>
+        </form>
+    }
+</section>
+
+<section class="panel">
+    <h2 class="panel__title">REGISTERED TOOLS</h2>
+    <table class="data-table">
+        <thead><tr><th>Name</th><th>Risk</th><th>Timeout</th><th>Description</th></tr></thead>
+        <tbody>
+        @foreach (var t in Model.Tools)
+        {
+            <tr>
+                <td>@t.Name</td>
+                <td class="@(t.RiskLevel is "High" or "Critical" ? "status-warn" : "status-ok")">@t.RiskLevel</td>
+                <td>@t.Timeout.TotalSeconds s</td>
+                <td>@t.Description</td>
+            </tr>
+        }
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title">AUDIT TRAIL (last 25)</h2>
+    <table class="data-table">
+        <thead><tr><th>When</th><th>Tool</th><th>Decision</th><th>Success</th><th>Exit</th></tr></thead>
+        <tbody>
+        @foreach (var e in Model.RecentExecutions)
+        {
+            <tr>
+                <td>@e.RequestedAtUtc.ToString("u")</td>
+                <td>@e.ToolName</td>
+                <td class="@(e.Decision == "Allowed" ? "status-ok" : e.Decision == "Denied" ? "status-fail" : "status-warn")">@e.Decision</td>
+                <td>@(e.Success is null ? "—" : e.Success.Value ? "YES" : "NO")</td>
+                <td>@(e.ExitCode?.ToString() ?? "—")</td>
+            </tr>
+        }
+        @if (!Model.RecentExecutions.Any())
+        {
+            <tr><td colspan="5">No tool executions yet.</td></tr>
+        }
+        </tbody>
+    </table>
+</section>
+
+<section class="panel">
+    <h2 class="panel__title">YOUR PERSISTENT COMMAND PERMISSIONS (Section 11)</h2>
+    <p style="font-size:0.75rem; color:var(--text-muted);">
+        Scoped to your account only. The static denylist/dangerous-pattern checks in CommandPolicyEngine always win regardless of an Always-Allow rule here.
+    </p>
+    <table class="data-table">
+        <thead><tr><th>Executable</th><th>Decision</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+        @foreach (var r in Model.PermissionRules)
+        {
+            <tr>
+                <td>@r.ExecutableName</td>
+                <td class="@(r.Decision == "AlwaysAllow" ? "status-ok" : "status-fail")">@r.Decision</td>
+                <td>@r.CreatedAtUtc.ToString("u")</td>
+                <td>
+                    <form method="post" asp-action="RevokePermission">
+                        <input type="hidden" name="executableName" value="@r.ExecutableName" />
+                        <button type="submit" class="btn-small">Revoke</button>
+                    </form>
+                </td>
+            </tr>
+        }
+        @if (!Model.PermissionRules.Any())
+        {
+            <tr><td colspan="4">No persistent rules yet — they're created from the "Always Allow/Deny" buttons above when a command needs approval.</td></tr>
+        }
+        </tbody>
+    </table>
+</section>
