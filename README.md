@@ -180,12 +180,15 @@ dotnet test tests/LocalAgentPlatform.Integration.Tests
 ```
 
 > **Note on verification:** this project was authored in a sandbox without the
-> .NET SDK available, so it has **not** been compiled here, and the CI workflow has
-> not actually run on GitHub Actions. Package versions (EF Core 8.0.8, Npgsql
-> 8.0.4, Swashbuckle.AspNetCore 6.6.2, xUnit 2.9.2, Roslyn 4.11.0, etc.) are
-> believed compatible with net8.0 as of early 2026 but you should run
-> `dotnet build` and `dotnet test`, and fix any version drift, before relying on
-> this.
+> .NET SDK available, so it has not been compiled here. It **has** now been pushed
+> and run through GitHub Actions once, which caught a real `dotnet restore` failure
+> (a Roslyn/`Microsoft.CodeAnalysis` version conflict between EF Core's design-time
+> package and the real Roslyn symbol extractor, plus a flagged vulnerable
+> `System.Text.Json` reference that didn't need to exist at all) — both are fixed in
+> the current code (see `docs/STATUS.md` for the exact detail), but the workflow has
+> not yet been re-run to confirm the fix is complete and nothing further surfaces
+> once restore actually succeeds. Treat this as "closer to verified than before,
+> not yet fully green."
 
 ## Where to go next
 
