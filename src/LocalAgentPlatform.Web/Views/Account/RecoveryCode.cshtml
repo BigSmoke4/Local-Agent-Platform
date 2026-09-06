@@ -1,0 +1,7 @@
+@{ ViewData["Title"] = "Recovery Code"; Layout = "_AuthLayout"; }
+<section class="panel" style="max-width:560px; margin:3rem auto;">
+    <h2 class="panel__title">ACCOUNT RECOVERY CODE</h2>
+    <p>Store this code securely. It is shown only once and can reset your password if you lose access to MFA.</p>
+    <pre style="user-select:all; white-space:pre-wrap;">@ViewBag.RecoveryCode</pre>
+    <a class="btn-small" href="@Url.Action("Login")">Continue to login</a>
+</section>

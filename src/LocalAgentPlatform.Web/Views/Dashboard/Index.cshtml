@@ -1,0 +1,50 @@
+@model DashboardViewModel
+@{
+    ViewData["Title"] = "Dashboard";
+    string Bytes(long? b) => b.HasValue ? $"{b.Value / 1024.0 / 1024.0 / 1024.0:0.0} GB" : "Unavailable";
+    string Pct(double? p) => p.HasValue ? $"{p.Value:0}%" : "Unavailable";
+}
+
+<div class="panel-grid">
+    <section class="panel">
+        <h2 class="panel__title">MODEL PROVIDER (Ollama)</h2>
+        <div class="panel__row">
+            <span>Status</span>
+            <span class="@(Model.ModelProviderHealthy ? "status-ok" : "status-fail")">
+                @(Model.ModelProviderHealthy ? "READY" : "UNREACHABLE")
+            </span>
+        </div>
+        @if (!Model.ModelProviderHealthy)
+        {
+            <div class="panel__row"><span>Detail</span><span>@Model.ModelProviderDetail</span></div>
+        }
+        <div class="panel__row"><span>Models registered with runtime</span><span>@Model.AvailableModels.Count</span></div>
+        <ul class="model-list">
+            @foreach (var m in Model.AvailableModels)
+            {
+                <li>@m.Id — @(m.Quantization ?? "n/a") — @Bytes(m.FileSizeBytes)</li>
+            }
+        </ul>
+    </section>
+
+    <section class="panel">
+        <h2 class="panel__title">HARDWARE</h2>
+        <div class="panel__row"><span>CPU</span><span data-telemetry="cpu">@Pct(Model.CpuUtilizationPercent)</span></div>
+        <div class="panel__row"><span>RAM</span><span data-telemetry="ram">@Bytes(Model.RamUsedBytes) / @Bytes(Model.RamTotalBytes)</span></div>
+        <div class="panel__row"><span>GPU</span><span data-telemetry="gpu">@Pct(Model.GpuUtilizationPercent)</span></div>
+        <div class="panel__row"><span>VRAM</span><span data-telemetry="vram">@Bytes(Model.GpuVramUsedBytes) / @Bytes(Model.GpuVramTotalBytes)</span></div>
+        <p style="font-size:0.7rem; color:var(--text-muted); margin-top:0.5rem;">Updates live via SignalR every ~3s.</p>
+    </section>
+
+    <section class="panel">
+        <h2 class="panel__title">WORKSPACE</h2>
+        <div class="panel__row"><span>Projects</span><span>@Model.TotalProjectCount</span></div>
+        <div class="panel__row"><span>Repositories</span><span>@Model.TotalRepositoryCount</span></div>
+        <div class="panel__row"><span>Active Agent Sessions</span><span>@Model.ActiveAgentSessionCount</span></div>
+    </section>
+</div>
+
+@section Scripts {
+    <script src="~/lib/signalr/dist/browser/signalr.min.js"></script>
+    <script src="~/js/telemetry.js"></script>
+}

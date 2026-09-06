@@ -1,0 +1,60 @@
+@model AgentIndexViewModel
+@{
+    ViewData["Title"] = "Agent";
+}
+
+@if (TempData["AgentError"] is string err && !string.IsNullOrEmpty(err))
+{
+    <section class="panel"><div class="panel__row"><span class="status-fail">Error</span><span>@err</span></div></section>
+}
+
+<section class="panel">
+    <h2 class="panel__title">START AGENT SESSION</h2>
+    @if (!Model.Repositories.Any() || !Model.RegisteredModels.Any())
+    {
+        <p>Register at least one repository and one model before starting a session.</p>
+    }
+    else
+    {
+        <form method="post" asp-action="Start">
+            <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.5rem;">
+                <select name="repositoryId" required>
+                    @foreach (var r in Model.Repositories)
+                    {
+                        <option value="@r.Id">@r.LocalPath</option>
+                    }
+                </select>
+                <select name="modelId" required>
+                    @foreach (var m in Model.RegisteredModels)
+                    {
+                        <option value="@m.ModelId">@m.Name @(m.IsDefault ? "(default)" : "")</option>
+                    }
+                </select>
+            </div>
+            <textarea name="userRequest" placeholder="Describe what you want the agent to do, e.g. 'List the files in the repository root and summarize the project structure.'" rows="3" style="width:100%; margin-bottom:0.5rem;"></textarea>
+            <button type="submit" class="btn-small">Start Session</button>
+        </form>
+    }
+</section>
+
+<section class="panel">
+    <h2 class="panel__title">RECENT SESSIONS</h2>
+    <table class="data-table">
+        <thead><tr><th>Created</th><th>Request</th><th>State</th><th></th></tr></thead>
+        <tbody>
+        @foreach (var s in Model.Sessions)
+        {
+            <tr>
+                <td>@s.CreatedAtUtc.ToString("u")</td>
+                <td>@(s.UserRequest.Length > 60 ? s.UserRequest[..60] + "…" : s.UserRequest)</td>
+                <td class="@(s.State == "Completed" ? "status-ok" : s.State is "Failed" or "Cancelled" ? "status-fail" : "status-warn")">@s.State</td>
+                <td><a href="@Url.Action("Details", new { id = s.Id })" class="btn-small" style="text-decoration:none;">View</a></td>
+            </tr>
+        }
+        @if (!Model.Sessions.Any())
+        {
+            <tr><td colspan="4">No sessions yet.</td></tr>
+        }
+        </tbody>
+    </table>
+</section>
