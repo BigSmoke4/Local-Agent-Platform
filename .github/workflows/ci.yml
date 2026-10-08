@@ -145,6 +145,11 @@ jobs:
           LAP_ADOPTION_CONFIRM_TARGET_DATABASE: lap_ensurecreated_adoption_test
           LAP_ADOPTION_CONFIRM_WRITERS_STOPPED: I_STOPPED_ALL_WRITERS
         run: |
+          set -euo pipefail
+          fail_ci() {
+            printf '::error title=EnsureCreated adoption CI fixture failed::%s\n' "$1" >&2
+            exit 1
+          }
           admin_url='postgresql://postgres:postgres@localhost:5432/postgres'
           psql --no-psqlrc --set=ON_ERROR_STOP=1 "$admin_url" \
             --command='CREATE DATABASE lap_ensurecreated_adoption_test TEMPLATE template0'
@@ -158,27 +163,26 @@ jobs:
             --command='CREATE TABLE public."UnexpectedLegacyTable" ("Id" integer NOT NULL)'
           if LAP_ADOPTION_BACKUP_FILE="$RUNNER_TEMP/ensurecreated-mismatch.dump" \
             bash scripts/adopt-ensurecreated-database.sh; then
-            echo 'Adoption unexpectedly accepted a mismatched schema.' >&2
-            exit 1
+            fail_ci 'Adoption unexpectedly accepted a mismatched schema.'
           fi
-          test -s "$RUNNER_TEMP/ensurecreated-mismatch.dump"
-          test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-mismatch.dump")" = '600'
+          test -s "$RUNNER_TEMP/ensurecreated-mismatch.dump" || fail_ci 'Mismatched-schema run did not leave its pre-change backup.'
+          test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-mismatch.dump")" = '600' || fail_ci 'Mismatch backup mode is not 0600.'
           history_exists="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
             --command="SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = '__EFMigrationsHistory')::text")"
-          test "$history_exists" = 'false'
+          test "$history_exists" = 'false' || fail_ci 'Failed mismatched-schema adoption inserted EF migration history.'
           unexpected_table_exists="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
             --command="SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'UnexpectedLegacyTable')::text")"
-          test "$unexpected_table_exists" = 'true'
+          test "$unexpected_table_exists" = 'true' || fail_ci 'Mismatched-schema adoption removed or modified the unexpected table.'
           sentinel_count="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
             --command="SELECT count(*)::text FROM public.\"Projects\" WHERE \"Name\" = 'ensurecreated-adoption-sentinel'")"
-          test "$sentinel_count" = '1'
+          test "$sentinel_count" = '1' || fail_ci 'Existing sentinel row changed by the rejected adoption attempt.'
           psql --no-psqlrc --set=ON_ERROR_STOP=1 "$target_url" \
             --command='DROP TABLE public."UnexpectedLegacyTable"'
 
           LAP_ADOPTION_BACKUP_FILE="$RUNNER_TEMP/ensurecreated-adopted.dump" \
             bash scripts/adopt-ensurecreated-database.sh
-          test -s "$RUNNER_TEMP/ensurecreated-adopted.dump"
-          test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-adopted.dump")" = '600'
+          test -s "$RUNNER_TEMP/ensurecreated-adopted.dump" || fail_ci 'Successful adoption did not leave its backup.'
+          test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-adopted.dump")" = '600' || fail_ci 'Adoption backup mode is not 0600.'
           ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=lap_ensurecreated_adoption_test;Username=postgres;Password=postgres' \
             dotnet ef database update \
               --context PlatformDbContext \
@@ -186,13 +190,13 @@ jobs:
               --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
           migration_count="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
             --command='SELECT count(*)::text FROM public."__EFMigrationsHistory"')"
-          test "$migration_count" = '1'
+          test "$migration_count" = '1' || fail_ci 'Expected exactly one applied migration after adoption.'
           migration_id="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
             --command='SELECT "MigrationId" FROM public."__EFMigrationsHistory"')"
-          test "$migration_id" = '20261008063621_InitialCreate'
+          test "$migration_id" = '20261008063621_InitialCreate' || fail_ci "Unexpected EF migration ID after adoption: $migration_id"
           sentinel_count="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
             --command="SELECT count(*)::text FROM public.\"Projects\" WHERE \"Name\" = 'ensurecreated-adoption-sentinel'")"
-          test "$sentinel_count" = '1'
+          test "$sentinel_count" = '1' || fail_ci 'The adopted database did not preserve the existing sentinel row.'
 
       - name: Publish test results
         if: always()

@@ -85,9 +85,16 @@ reference_created=0
 restore_created=0
 partial_backup=""
 
+report_unexpected_error() {
+  local status="$1"
+  local line="$2"
+  printf '::error file=scripts/adopt-ensurecreated-database.sh,line=%s,title=EnsureCreated adoption failed::Helper command failed (exit %s). A backup, if already created, remains at %s.\n' \
+    "$line" "$status" "${backup_path:-'(not created)'}" >&2
+}
+
 cleanup() {
   local status=$?
-  trap - EXIT
+  trap - EXIT ERR
   set +e
   if [[ "$reference_created" == "1" ]]; then
     if ! psql --no-psqlrc --set=ON_ERROR_STOP=1 --dbname="$admin_url" \
@@ -106,6 +113,7 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+trap 'report_unexpected_error "$?" "${BASH_LINENO[0]:-unknown}"' ERR
 
 # Keep passwords out of process arguments. Both PostgreSQL URLs are normalized to
 # password-free URIs and the decoded credentials are written to a private .pgpass file.
