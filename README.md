@@ -104,7 +104,7 @@ Tool execution includes:
 - Serilog structured logging.
 - OpenTelemetry ASP.NET Core/HTTP tracing.
 - Dockerfile + Docker Compose.
-- GitHub Actions CI for VS Code Node and Extension Host tests, .NET restore/build/unit/PostgreSQL integration tests, EF baseline generation, and Docker build.
+- GitHub Actions CI for VS Code Node and Extension Host tests, .NET restore/build/unit/PostgreSQL integration tests, EF baseline generation, Docker image build, and a hardened PostgreSQL-backed container runtime smoke test (live health and non-root UID).
 - **GitHub Actions CD** publishes images to GHCR and can deploy over SSH to a protected `production` environment when deployment variables/secrets are configured.
 
 ## Repository layout
@@ -354,7 +354,7 @@ Production secrets remain outside the repository and should be supplied through 
 - The semantic memory vector is currently stored as JSON for provider/database portability rather than requiring `pgvector`. For very large memory stores, migrate to `pgvector` or another ANN index.
 - NVIDIA and ROCm telemetry depend on vendor CLIs being installed and visible to the application process.
 - The VS Code extension has 23 passing Node API-client/command-flow/manifest/filesystem-safety tests and packages successfully as a VSIX. The VS Code Extension Host smoke test passes in GitHub Actions; local VS Code download was blocked by a TLS failure. Live-platform end-to-end testing remains outstanding.
-- CI can generate and publish a temporary EF baseline migration artifact when none is committed; review and check that baseline into source control before treating schema evolution as production-ready.
+- CI can generate and publish a temporary EF baseline migration artifact when none is committed; review and check that baseline into source control before treating schema evolution as production-ready. The artifact and Actions logs could not be downloaded from this sandbox because GitHub's Actions storage endpoint returned `EOF`; the baseline remains uncommitted.
 
 ## Documentation
 
