@@ -15,9 +15,47 @@ public sealed class RealProcessToolTests
         {
             var tool = new TerminalTool(NullLogger<TerminalTool>.Instance);
             var command = OperatingSystem.IsWindows() ? "dotnet --version" : "dotnet --version";
-            var result = await tool.ExecuteAsync(new Dictionary<string,string> { ["command"] = command }, new ToolExecutionContext(dir.FullName, Guid.NewGuid()));
+            var result = await tool.ExecuteAsync(
+                new Dictionary<string,string> { ["command"] = command },
+                new ToolExecutionContext(dir.FullName, Guid.NewGuid(), ApprovalGranted: true));
             Assert.True(result.Success, result.Error);
             Assert.False(string.IsNullOrWhiteSpace(result.Output));
+        }
+        finally { dir.Delete(true); }
+    }
+
+    [Fact]
+    public async Task TerminalTool_requires_one_time_approval_even_for_allowlisted_executables()
+    {
+        var dir = Directory.CreateTempSubdirectory("lap-terminal-approval-");
+        try
+        {
+            var tool = new TerminalTool(NullLogger<TerminalTool>.Instance);
+            var result = await tool.ExecuteAsync(
+                new Dictionary<string, string> { ["command"] = "dotnet --version" },
+                new ToolExecutionContext(dir.FullName, Guid.NewGuid()));
+
+            Assert.False(result.Success);
+            Assert.Contains("one-time human approval", result.Error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { dir.Delete(true); }
+    }
+
+    [Fact]
+    public async Task BuildAndTestTools_require_approval_before_running_workspace_code()
+    {
+        var dir = Directory.CreateTempSubdirectory("lap-build-test-approval-");
+        try
+        {
+            var parameters = new Dictionary<string, string> { ["target"] = "." };
+            var context = new ToolExecutionContext(dir.FullName, Guid.NewGuid());
+            var build = await new BuildTool().ExecuteAsync(parameters, context);
+            var test = await new TestTool().ExecuteAsync(parameters, context);
+
+            Assert.False(build.Success);
+            Assert.Contains("one-time human approval", build.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.False(test.Success);
+            Assert.Contains("one-time human approval", test.Error, StringComparison.OrdinalIgnoreCase);
         }
         finally { dir.Delete(true); }
     }
@@ -47,7 +85,7 @@ public sealed class RealProcessToolTests
             var tool = new BuildTool();
             var result = await tool.ExecuteAsync(
                 new Dictionary<string, string> { ["target"] = "../outside.sln" },
-                new ToolExecutionContext(dir.FullName, Guid.NewGuid()));
+                new ToolExecutionContext(dir.FullName, Guid.NewGuid(), ApprovalGranted: true));
             Assert.False(result.Success);
             Assert.Contains("inside the workspace", result.Error, StringComparison.OrdinalIgnoreCase);
             Assert.Equal(ToolRiskLevel.High, tool.RiskLevel);

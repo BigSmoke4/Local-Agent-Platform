@@ -249,16 +249,23 @@ jobs:
             --volume "${{ github.workspace }}/workspace:/workspace" \
             --volume lap-runtime-smoke-keyring:/var/lib/local-agent-platform/keyring \
             --env ASPNETCORE_URLS=http://+:18080 \
-            --env ASPNETCORE_ENVIRONMENT=Development \
+            --env ASPNETCORE_ENVIRONMENT=Production \
+            --env AllowedHosts=lap-ci.example.test \
             --env ConnectionStrings__PlatformDb="Host=localhost;Port=5432;Database=local_agent_platform_test;Username=postgres;Password=postgres" \
             --env Repositories__AllowedRoots__0=/workspace \
             --env DataProtection__KeyRingPath=/var/lib/local-agent-platform/keyring \
+            --env ForwardedHeaders__Enabled=true \
+            --env ForwardedHeaders__KnownProxies__0=127.0.0.1 \
             local-agent-platform:ci
 
-      - name: Verify live health and non-root process identity
+      - name: Verify live health, persistent key-ring permissions, and non-root process identity
         run: |
           for attempt in $(seq 1 45); do
-            if curl --fail --silent http://127.0.0.1:18080/health/live >/dev/null; then
+            if curl --fail --silent \
+              --header 'Host: lap-ci.example.test' \
+              --header 'X-Forwarded-For: 192.0.2.10' \
+              --header 'X-Forwarded-Proto: https' \
+              http://127.0.0.1:18080/health/live >/dev/null; then
               break
             fi
             if [ "$(docker inspect --format '{{.State.Running}}' lap-runtime-smoke)" != "true" ]; then
@@ -267,9 +274,21 @@ jobs:
             fi
             sleep 2
           done
-          curl --fail --show-error http://127.0.0.1:18080/health/live
+          curl --fail --show-error \
+            --header 'Host: lap-ci.example.test' \
+            --header 'X-Forwarded-For: 192.0.2.10' \
+            --header 'X-Forwarded-Proto: https' \
+            http://127.0.0.1:18080/health/live
           process_uid="$(docker exec lap-runtime-smoke cat /proc/1/status | awk '$1 == "Uid:" {print $2}')"
           test "$process_uid" = "1000"
+          keyring_state="$(docker exec lap-runtime-smoke stat -c '%a:%u:%g' /var/lib/local-agent-platform/keyring)"
+          test "$keyring_state" = "700:1000:1000"
+          rejected_host_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header 'Host: attacker.example.invalid' http://127.0.0.1:18080/health/live)"
+          test "$rejected_host_status" = "400"
+          swagger_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header 'Host: lap-ci.example.test' http://127.0.0.1:18080/swagger/v1/swagger.json)"
+          test "$swagger_status" = "404"
 
       - name: Collect container logs
         if: always()

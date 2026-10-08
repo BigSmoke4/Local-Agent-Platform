@@ -8,6 +8,10 @@ if ! command -v dotnet >/dev/null 2>&1; then
   echo "The .NET 8 SDK is required to generate the EF Core baseline migration." >&2
   exit 127
 fi
+if [[ -z "${ConnectionStrings__PlatformDb:-}" ]]; then
+  echo "Set ConnectionStrings__PlatformDb explicitly before running EF design-time commands; no credentials are supplied by the repository." >&2
+  exit 2
+fi
 
 migration_dir="src/Shared/Data/Migrations"
 if [[ -d "$migration_dir" ]] && find "$migration_dir" -maxdepth 1 -type f -name '*.cs' -print -quit | grep -q .; then

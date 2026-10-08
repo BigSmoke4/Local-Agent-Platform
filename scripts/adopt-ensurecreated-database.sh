@@ -323,7 +323,8 @@ pg_restore --exit-on-error --no-owner --no-acl --dbname="$restore_url" "$backup_
 # Build a clean reference schema from the committed migration, not from EnsureCreated.
 # This helper intentionally supports only InitialCreate; it will refuse later migrations.
 dotnet tool restore
-dotnet ef migrations script 0 \
+ConnectionStrings__PlatformDb='Host=127.0.0.1;Port=1;Database=lap_script_generation_only;Username=lap_no_connect;Password=not-used' \
+  dotnet ef migrations script 0 \
   --context PlatformDbContext \
   --project src/Shared/Data/Shared.Data.csproj \
   --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj \

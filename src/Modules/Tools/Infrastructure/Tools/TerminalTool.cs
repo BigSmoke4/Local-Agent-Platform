@@ -32,6 +32,8 @@ public sealed class TerminalTool : ITool
     {
         if (!parameters.TryGetValue("command", out var command) || string.IsNullOrWhiteSpace(command))
             return ToolExecutionResult.Fail("Missing required parameter 'command'.");
+        if (!context.ApprovalGranted)
+            return ToolExecutionResult.Fail("TerminalTool is high risk and requires explicit one-time human approval.");
 
         if (!CommandPolicyEngine.TryParseSimpleCommand(command, out var parsed, out var parseError) || parsed is null)
             return ToolExecutionResult.Fail($"TerminalTool refused the command: {parseError}");

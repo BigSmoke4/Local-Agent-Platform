@@ -12,6 +12,8 @@ MVC uses ASP.NET Core cookie authentication. Passwords are stored using the proj
 
 API keys are generated with high-entropy random material, displayed once, and stored only as SHA-256 hashes. `/api/*` endpoints require the API-key authentication scheme. The VS Code client stores its key through VS Code `SecretStorage`, never in extension settings or workspace files. It refuses to send keys over plain HTTP except to loopback hosts; deployments accessed across a network must provide HTTPS. API-key authentication is not a substitute for TLS or network access controls.
 
+In Production, the authentication cookie is `Secure`, `HttpOnly`, `SameSite=Lax`, and uses the `__Host-` prefix; direct HTTP access is not a supported deployment. Swagger is disabled outside Development. The app refuses wildcard/loopback-only Host filtering, missing persistent Data Protection storage, and invalid/empty production workspace allowlists. The container entrypoint repairs key-ring ownership and sets directory/file modes to `0700`/`0600`; persistence, at-rest encryption, backup, restore, and host-volume permissions still require deployment verification. If TLS terminates at a proxy, only explicitly configured proxy IPs are trusted for `X-Forwarded-For` and `X-Forwarded-Proto`; configure the proxy to overwrite those headers.
+
 ## Roles
 
 Two roles are implemented:
@@ -19,7 +21,7 @@ Two roles are implemented:
 - `Admin`
 - `User`
 
-The first account becomes `Admin`. Once an account exists, anonymous registration is closed and new accounts can only be created by an authenticated admin.
+The first account becomes `Admin`. In Development, local bootstrap registration is open. In Production, creating the first admin additionally requires a deployment-supplied `Security__BootstrapAdminToken` of at least 32 bytes; remove it after bootstrap. Once an account exists, anonymous registration is closed and new accounts can only be created by an authenticated admin. Production startup also requires exact non-loopback `AllowedHosts`, a persistent absolute Data Protection key-ring path, valid configured workspace roots, and an explicitly trusted reverse proxy for TLS-forwarded headers.
 
 Role claims are written into the MVC authentication cookie. The API currently relies primarily on owner identity rather than role-gated administration endpoints.
 
@@ -78,7 +80,7 @@ Child process environments are filtered to remove application secrets. Tool outp
 For internet-facing or enterprise use, add at minimum:
 
 - Account lockout and per-account failed-attempt tracking. Login, registration, MFA confirmation, and recovery currently have a tighter per-remote-IP rate limit, which does not stop distributed attacks.
-- Data Protection key rotation, filesystem permission, backup, and multi-instance operational strategy. Optional key-ring persistence is configured; Docker Compose uses a named volume.
+- Data Protection key-ring encryption at rest, rotation, backup/restore, filesystem permission review, and multi-instance operations. Production now fails closed unless an absolute key-ring path is configured, but persistence and recovery still require an operator-provisioned protected volume.
 - Fine-grained RBAC/permissions beyond the current Admin/User split.
 - CSRF/security regression tests for all state-changing MVC actions.
 - OS-level sandbox/container isolation for tool processes.

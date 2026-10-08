@@ -9,3 +9,10 @@ obj/
 node_modules/
 .vscode-test/
 *.vsix
+
+# Local Compose/deployment credentials; only checked-in example files are safe.
+.env
+.env.*
+*.env
+*.env.*
+!.env.example

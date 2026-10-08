@@ -20,6 +20,9 @@ public sealed class BuildTool : ITool
     public Task<ToolExecutionResult> ExecuteAsync(
         IReadOnlyDictionary<string, string> parameters, ToolExecutionContext context, CancellationToken ct = default)
     {
+        if (!context.ApprovalGranted)
+            return Task.FromResult(ToolExecutionResult.Fail("BuildTool is high risk and requires explicit one-time human approval."));
+
         var requested = parameters.TryGetValue("target", out var target) && !string.IsNullOrWhiteSpace(target) ? target : ".";
         if (!TryResolveTarget(requested, context.RepositoryRootPath, out var safeTarget, out var error))
             return Task.FromResult(ToolExecutionResult.Fail(error));
@@ -71,6 +74,9 @@ public sealed class TestTool : ITool
     public Task<ToolExecutionResult> ExecuteAsync(
         IReadOnlyDictionary<string, string> parameters, ToolExecutionContext context, CancellationToken ct = default)
     {
+        if (!context.ApprovalGranted)
+            return Task.FromResult(ToolExecutionResult.Fail("TestTool is high risk and requires explicit one-time human approval."));
+
         var requested = parameters.TryGetValue("target", out var target) && !string.IsNullOrWhiteSpace(target) ? target : ".";
         if (!BuildTool.TryResolveTarget(requested, context.RepositoryRootPath, out var safeTarget, out var error))
             return Task.FromResult(ToolExecutionResult.Fail(error));

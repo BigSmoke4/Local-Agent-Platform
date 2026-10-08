@@ -2,7 +2,7 @@
 
 A local-first autonomous coding platform built with **ASP.NET Core 8, PostgreSQL, EF Core, Ollama, SignalR, Roslyn, and a modular-monolith architecture**. It can index repositories, build repository context, plan multi-step coding work, execute guarded local tools, verify changes, retain semantic memory, expose an authenticated API, and stream telemetry without requiring a cloud LLM.
 
-> This repository intentionally distinguishes implemented features from environment-dependent integrations. See [`docs/STATUS.md`](docs/STATUS.md) for the current verification matrix and [`docs/SECURITY.md`](docs/SECURITY.md) for the security model.
+> This repository intentionally distinguishes implemented features from environment-dependent integrations. See [`docs/STATUS.md`](docs/STATUS.md) for the current verification matrix, [`docs/SECURITY.md`](docs/SECURITY.md) for the security model, and [`docs/PRODUCTION_DEPLOYMENT.md`](docs/PRODUCTION_DEPLOYMENT.md) for required deployment gates and known production blockers.
 
 ## What is implemented
 
@@ -98,11 +98,11 @@ Tool execution includes:
 ### API, observability, CI/CD
 
 - Authenticated API-key-protected `/api/*` endpoints.
-- Swagger/OpenAPI UI.
-- Fixed-window API rate limiting.
+- Swagger/OpenAPI UI in Development only.
+- Fixed-window API rate limiting; trusted reverse-proxy IP/protocol forwarding is opt-in and requires exact configured proxy IPs.
 - PostgreSQL and Ollama health checks.
 - Serilog structured logging.
-- OpenTelemetry ASP.NET Core/HTTP tracing.
+- OpenTelemetry ASP.NET Core/HTTP tracing instrumentation; console export is Development-only and a production exporter/retention policy must be configured separately.
 - Dockerfile + Docker Compose.
 - GitHub Actions CI for VS Code Node and Extension Host tests, live-platform E2E harness safety tests, the disposable .NET fixture build/test, .NET restore/build/unit/PostgreSQL integration tests, EF model-snapshot validation and migration against fresh PostgreSQL, Docker image build, and a hardened container runtime smoke test (live health and non-root UID). The opt-in live model/platform session itself is not run in CI.
 - **GitHub Actions CD** publishes images to GHCR and can deploy over SSH to a protected `production` environment when deployment variables/secrets are configured.
@@ -153,7 +153,7 @@ For direct development:
 - Optional GPU telemetry: `nvidia-smi` or `rocm-smi`
 - Optional load tests: k6
 
-Docker Compose can supply PostgreSQL and Ollama. Published service ports bind to loopback by default; they are not exposed to the LAN. A trusted entrypoint uses only the capabilities needed to repair key-ring volume ownership and drop privileges; the web process then runs as a configurable non-root UID (default `1000`), with all other capabilities dropped and `no-new-privileges` enabled. Make sure the host `workspace/` directory and mounted repositories are writable by that UID. On Linux, if your account uses a different UID/GID, export `LOCAL_AGENT_UID=$(id -u)` and `LOCAL_AGENT_GID=$(id -g)` before building the Compose service.
+Docker Compose is a **local-development setup**, not the production deployment. It binds service ports to loopback, sets `ASPNETCORE_ENVIRONMENT=Development`, and has intentionally weak local-only PostgreSQL defaults (`postgres`/`postgres`). Copy `.env.example` to `.env` to override them; `.env` is ignored by Git. Never reuse those defaults on a shared host. A trusted entrypoint uses only the capabilities needed to repair key-ring volume ownership and drop privileges; the web process then runs as a configurable non-root UID (default `1000`), with all other capabilities dropped and `no-new-privileges` enabled. Make sure the host `workspace/` directory and mounted repositories are writable by that UID. On Linux, if your account uses a different UID/GID, export `LOCAL_AGENT_UID=$(id -u)` and `LOCAL_AGENT_GID=$(id -g)` before building the Compose service.
 
 ## Quick start with Docker Compose
 
@@ -176,9 +176,10 @@ http://localhost:8080
 
 The initial migration, designer, and model snapshot are committed under `src/Shared/Data/Migrations/`. Application startup applies pending migrations with `Database.MigrateAsync()`. CI verifies that the snapshot matches the current model, applies the baseline to a clean PostgreSQL database, and runs the integration suite against that database. Non-Development environments fail closed if the migration assembly is unexpectedly empty; only Development retains `EnsureCreatedAsync()` as a fallback.
 
-Create future migrations from the repository root with the .NET 8 SDK:
+Create future migrations from the repository root with the .NET 8 SDK. Set an explicit development/disposable connection string for the design-time context; the repository no longer supplies a fallback credential:
 
 ```bash
+export ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=local_agent_platform;Username=postgres;Password=postgres'
 dotnet tool restore
 dotnet ef migrations add AddYourFeature \
   --context PlatformDbContext \
@@ -199,10 +200,12 @@ ollama pull llama3.2:3b
 ollama pull nomic-embed-text
 ```
 
-Set configuration if needed:
+Direct runs are for development only. Set configuration explicitly (the web host has no bundled database credentials):
 
 ```bash
+export ASPNETCORE_ENVIRONMENT=Development
 export ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=local_agent_platform;Username=postgres;Password=postgres'
+export Repositories__AllowedRoots__0="$HOME/dev"
 export Ollama__BaseUrl='http://localhost:11434'
 export Ollama__EmbeddingModel='nomic-embed-text'
 ```
@@ -217,7 +220,7 @@ dotnet run --project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
 
 ## First account and security setup
 
-The first registered account becomes `Admin`. Registration closes to anonymous users after that; an admin can create additional users.
+The first registered account becomes `Admin`. In Development, that local bootstrap is open as before. In Production, first-admin registration is blocked unless the operator supplies `Security__BootstrapAdminToken` (at least 32 bytes) out of band; generate one with `openssl rand -hex 32`, provide it only through a secret manager/environment, and remove it after the first admin is created. Registration closes to anonymous users after that; an admin can create additional users.
 
 Each new account receives a random recovery code displayed exactly once. Save it securely. It is hashed in the database and rotated when used.
 
@@ -369,9 +372,9 @@ The open-file request accepts a canonical file path under an allowed repository,
 `.github/workflows/cd.yml`:
 
 1. Builds the Docker image.
-2. Publishes `latest` and SHA-tagged images to GHCR.
-3. Optionally deploys the `web` service over SSH.
-4. Gates deployment with `/health/ready`.
+2. Publishes `latest` and full-commit-SHA-tagged images to GHCR.
+3. Optionally deploys the `web` service over SSH from `main`, passing the immutable image as `LAP_DEPLOY_IMAGE`.
+4. Gates deployment with `/health/ready`; the external production Compose file must use that supplied image reference rather than `latest` or a local build.
 
 For SSH deployment configure a GitHub `production` environment with:
 

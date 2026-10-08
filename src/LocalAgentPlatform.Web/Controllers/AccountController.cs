@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using LocalAgentPlatform.Shared.Data;
 using LocalAgentPlatform.Shared.Data.Entities;
+using LocalAgentPlatform.Shared.Kernel.Security;
 using LocalAgentPlatform.Web.Security;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -16,15 +17,29 @@ namespace LocalAgentPlatform.Web.Controllers;
 [AllowAnonymous]
 public class AccountController : Controller
 {
+    // Equalize the expensive password-hash work for unknown users to reduce username
+    // enumeration by timing; this random dummy hash is never accepted or persisted.
+    private static readonly string DummyPasswordHash = PasswordHasher.Hash(
+        Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
+
     private readonly PlatformDbContext _db;
     private readonly TotpService _totp;
     private readonly IDataProtector _mfaProtector;
+    private readonly IConfiguration _configuration;
+    private readonly IWebHostEnvironment _environment;
 
-    public AccountController(PlatformDbContext db, TotpService totp, IDataProtectionProvider dataProtection)
+    public AccountController(
+        PlatformDbContext db,
+        TotpService totp,
+        IDataProtectionProvider dataProtection,
+        IConfiguration configuration,
+        IWebHostEnvironment environment)
     {
         _db = db;
         _totp = totp;
         _mfaProtector = dataProtection.CreateProtector("LocalAgentPlatform.MfaSecret.v1");
+        _configuration = configuration;
+        _environment = environment;
     }
 
     [HttpGet]
@@ -32,13 +47,14 @@ public class AccountController : Controller
     {
         var anyUsers = await _db.Users.AnyAsync();
         if (anyUsers && (!(User.Identity?.IsAuthenticated ?? false) || !User.IsAdmin())) return RedirectToAction(nameof(Login));
+        SetRegistrationViewState(anyUsers);
         return View();
     }
 
     [HttpPost]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting("auth")]
-    public async Task<IActionResult> Register(string userName, string password, CancellationToken ct)
+    public async Task<IActionResult> Register(string userName, string password, string? bootstrapToken, CancellationToken ct)
     {
         // Serialize the bootstrap decision so two simultaneous first registrations
         // cannot both become administrators. This application targets PostgreSQL.
@@ -46,6 +62,16 @@ public class AccountController : Controller
         await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(764831245);", ct);
         var anyUsers = await _db.Users.AnyAsync(ct);
         if (anyUsers && (!(User.Identity?.IsAuthenticated ?? false) || !User.IsAdmin())) return Forbid();
+        SetRegistrationViewState(anyUsers);
+
+        // In production the first administrator must prove possession of a deployment
+        // secret delivered out-of-band. Development stays convenient for loopback setup.
+        if (!anyUsers && !_environment.IsDevelopment() &&
+            !BootstrapTokenVerifier.Verify(_configuration["Security:BootstrapAdminToken"], bootstrapToken))
+        {
+            ModelState.AddModelError("", "A valid deployment bootstrap token is required before the first production administrator can be created. Configure Security__BootstrapAdminToken (at least 32 bytes) and retry.");
+            return View();
+        }
 
         var normalizedUserName = userName?.Trim().ToLowerInvariant() ?? string.Empty;
         if (!System.Text.RegularExpressions.Regex.IsMatch(normalizedUserName, @"^[a-z0-9_.-]{3,64}$") ||
@@ -95,7 +121,13 @@ public class AccountController : Controller
     {
         var normalizedUserName = userName is { Length: <= 256 } ? userName.Trim().ToLowerInvariant() : string.Empty;
         var user = await _db.Users.FirstOrDefaultAsync(u => u.UserName.ToLower() == normalizedUserName);
-        if (user is null || password is null || password.Length > 256 || !PasswordHasher.Verify(password, user.PasswordHash))
+        if (password is null || password.Length > 256)
+        {
+            ModelState.AddModelError("", "Invalid username or password.");
+            return View();
+        }
+        var passwordVerified = PasswordHasher.Verify(password, user?.PasswordHash ?? DummyPasswordHash);
+        if (user is null || !passwordVerified)
         {
             ModelState.AddModelError("", "Invalid username or password.");
             return View();
@@ -232,7 +264,8 @@ public class AccountController : Controller
         await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(764831246);", ct);
         var normalizedUserName = userName?.Trim().ToLowerInvariant() ?? string.Empty;
         var user = await _db.Users.FirstOrDefaultAsync(u => u.UserName.ToLower() == normalizedUserName, ct);
-        if (user?.RecoveryCodeHash is null || !PasswordHasher.Verify(recoveryCode, user.RecoveryCodeHash))
+        var recoveryCodeVerified = PasswordHasher.Verify(recoveryCode, user?.RecoveryCodeHash ?? DummyPasswordHash);
+        if (user?.RecoveryCodeHash is null || !recoveryCodeVerified)
         {
             ModelState.AddModelError("", "Invalid username or recovery code.");
             return View();
@@ -256,5 +289,11 @@ public class AccountController : Controller
     {
         await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         return RedirectToAction(nameof(Login));
+    }
+
+    private void SetRegistrationViewState(bool anyUsers)
+    {
+        ViewBag.RequiresBootstrapToken = !anyUsers && !_environment.IsDevelopment();
+        ViewBag.BootstrapTokenConfigured = !string.IsNullOrWhiteSpace(_configuration["Security:BootstrapAdminToken"]);
     }
 }

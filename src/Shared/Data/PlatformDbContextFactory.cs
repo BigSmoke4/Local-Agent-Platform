@@ -9,13 +9,11 @@ namespace LocalAgentPlatform.Shared.Data;
 /// </summary>
 public sealed class PlatformDbContextFactory : IDesignTimeDbContextFactory<PlatformDbContext>
 {
-    private const string FallbackConnectionString =
-        "Host=localhost;Port=5432;Database=local_agent_platform;Username=postgres;Password=postgres";
-
     public PlatformDbContext CreateDbContext(string[] args)
     {
-        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__PlatformDb")
-            ?? FallbackConnectionString;
+        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__PlatformDb");
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new InvalidOperationException("Set ConnectionStrings__PlatformDb explicitly before running EF design-time commands; no database credentials are bundled as a fallback.");
         var options = new DbContextOptionsBuilder<PlatformDbContext>()
             .UseNpgsql(connectionString, npgsql => npgsql.EnableRetryOnFailure())
             .Options;
