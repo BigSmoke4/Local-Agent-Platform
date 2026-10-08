@@ -232,9 +232,16 @@ PY
 }
 
 assert_no_target_sessions() {
+  local phase="$1"
   local active
   active="$(psql_scalar "$admin_url" "SELECT count(*)::text FROM pg_catalog.pg_stat_activity WHERE datname = '$target_database' AND pid <> pg_backend_pid()")"
-  [[ "$active" =~ ^0+$ ]] || fail "found $active other connection(s) to '$target_database'; stop every writer/worker/client and retry."
+  [[ "$active" =~ ^0+$ ]] && return 0
+  if [[ "${LAP_ADOPTION_DIAGNOSTICS:-0}" == "1" ]]; then
+    local sessions
+    sessions="$(psql_scalar "$admin_url" "SELECT coalesce(string_agg('pid=' || pid::text || ',user=' || coalesce(usename, '') || ',app=' || coalesce(application_name, '') || ',state=' || coalesce(state, ''), '; ' ORDER BY pid), 'none') FROM pg_catalog.pg_stat_activity WHERE datname = '$target_database' AND pid <> pg_backend_pid()")"
+    fail "found $active other connection(s) to '$target_database' during $phase; stop every writer/worker/client and retry. Session summary: $sessions"
+  fi
+  fail "found $active other connection(s) to '$target_database' during $phase; stop every writer/worker/client and retry."
 }
 
 assert_history_absent() {
@@ -271,7 +278,7 @@ IFS=$'\t' read -r can_create_public foreign_owned_relations <<<"$target_privileg
 [[ "$can_create_public" == "true" ]] || fail "the target login lacks CREATE privilege on schema public."
 [[ "$foreign_owned_relations" =~ ^0+$ ]] || fail "the target login does not own every existing public relation; use the same migration-capable database role as the web app."
 assert_history_absent
-assert_no_target_sessions
+assert_no_target_sessions "initial backup preflight"
 
 # Connection URI parsing accepted only conservative database names; generated names
 # contain no user-supplied data and are recorded only after successful CREATE DATABASE.
@@ -454,7 +461,7 @@ PY
 
 # Recheck immediately before the only target write. If anything changed, abort with the
 # verified backup left in place. The DDL/row insert itself is one transaction.
-assert_no_target_sessions
+assert_no_target_sessions "final pre-write recheck"
 assert_history_absent
 dump_public_schema "$target_url" "$work_dir/target-schema-immediately-before.sql"
 compare_schema_or_refuse "$work_dir/target-schema-before.sql" "$work_dir/target-schema-immediately-before.sql" \

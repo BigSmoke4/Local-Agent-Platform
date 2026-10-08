@@ -144,6 +144,7 @@ jobs:
           LAP_ADOPTION_ADMIN_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
           LAP_ADOPTION_CONFIRM_TARGET_DATABASE: lap_ensurecreated_adoption_test
           LAP_ADOPTION_CONFIRM_WRITERS_STOPPED: I_STOPPED_ALL_WRITERS
+          LAP_ADOPTION_DIAGNOSTICS: "1"
         run: |
           set -euo pipefail
           fail_ci() {
