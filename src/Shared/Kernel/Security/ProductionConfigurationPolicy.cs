@@ -81,7 +81,8 @@ public static class ProductionConfigurationPolicy
                 normalizedHost = normalizedHost[..colon].TrimEnd('.');
         }
 
-        return normalizedHost.Equals("localhost", StringComparison.OrdinalIgnoreCase);
+        return normalizedHost.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+               (IPAddress.TryParse(normalizedHost, out address) && IPAddress.IsLoopback(address));
     }
 
 }

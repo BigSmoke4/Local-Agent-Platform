@@ -5,8 +5,9 @@ This file is the authoritative status ledger for the current repository. “Impl
 ## Verification for the current hardening patchset (2026-10-08)
 
 - Passed locally: live-E2E harness syntax check and 8 Node safety tests; shell syntax checks; JSON/project-XML parsing; `git diff --check`.
-- Not run locally: .NET build/unit/integration tests, PostgreSQL checks, Docker build/runtime smoke, or current-branch GitHub Actions. The environment has no .NET SDK, PostgreSQL client/server, or Docker. No live Ollama/platform session or deployment was performed.
-- GitHub Actions run [37767552706](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37767552706) passed the prior PR revision; it predates the current Production-mode smoke, Data Protection permission checks, hardened tool-level approval checks, and immutable-SHA CD changes. It is not verification of this patchset.
+- Not run locally: .NET build/unit/integration tests, PostgreSQL checks, or Docker build/runtime smoke. The environment has no .NET SDK, PostgreSQL client/server, or Docker. No live Ollama/platform session or deployment was performed.
+- Current GitHub Actions run [37775167484](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37775167484): Release build, disposable .NET fixture, migration snapshot/fresh-PostgreSQL migration, and VS Code jobs passed; the Domain test job failed on an IPv4 loopback-with-port policy case. The policy fix is committed in the follow-up; integration/adoption/Docker jobs were skipped pending a green unit-test job. This patchset still needs a full rerun.
+- Earlier CI run [37767552706](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37767552706) passed the prior PR revision; it predates the current Production-mode smoke, Data Protection permission checks, hardened tool-level approval checks, and immutable-SHA CD changes. It does not verify those changes.
 
 ## Implemented
 
