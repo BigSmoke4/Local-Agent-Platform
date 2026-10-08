@@ -63,6 +63,23 @@ jobs:
           set -o pipefail
           bash -x ./scripts/create-baseline-migration.sh 2>&1 | tee ef-baseline.log
 
+      - name: Publish generated baseline source for review
+        if: steps.ef-baseline.outcome == 'success'
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          from pathlib import Path
+
+          migration_dir = Path('src/Shared/Data/Migrations')
+          migration_files = sorted(migration_dir.glob('*.cs'))
+          print('## Temporary generated EF baseline source')
+          print('Review this generated source and commit the migration files before production schema evolution.')
+          for migration_file in migration_files:
+              print(f'\n### `{migration_file.as_posix()}`\n')
+              print('```csharp')
+              print(migration_file.read_text())
+              print('```')
+          PY
+
       - name: Build
         run: dotnet build src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj --no-restore -c Release
 
