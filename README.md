@@ -135,6 +135,7 @@ tests/
 
 scripts/
   run-live-tests.sh
+  run-live-platform-e2e.js
   run-load-test.sh
   create-baseline-migration.sh
 ```
@@ -274,6 +275,38 @@ export LAP_OLLAMA_MODEL='llama3.2:3b'
 
 The live Ollama test is reported as **skipped**, not passed, unless `LAP_RUN_LIVE_TESTS=1` is set. When enabled, it requires a reachable Ollama server with the configured model already pulled; set `LAP_OLLAMA_URL` and `LAP_OLLAMA_MODEL` as needed.
 
+### Opt-in live platform/API end-to-end test
+
+`scripts/run-live-platform-e2e.js` drives a real authenticated API session against an already-running platform. It checks live readiness, model/repository discovery, creates a session through `/api/agent/sessions`, polls persisted session/task state, verifies one exact file write, and checks the real BuildTool/TestTool outputs. It calls the configured Ollama model through the platform; it does not stub the model or start a fake web server. The test runner itself does not launch VS Code, so a live extension-host/UI interaction is still a separate verification gap.
+
+This test executes repository build/test code and intentionally requires both an exact disposable-fixture repository and two explicit opt-ins. Never point it at a real project or valuable working tree.
+
+Prepare the checked-in fixture as a dedicated clean repository. For Docker Compose, run from the project root so it is mounted at `/workspace/live-e2e`:
+
+```bash
+mkdir -p workspace/live-e2e
+cp -a tests/fixtures/live-platform-e2e/. workspace/live-e2e/
+git -C workspace/live-e2e init
+git -C workspace/live-e2e add --all
+git -C workspace/live-e2e -c user.name='LAP E2E Fixture' -c user.email='lap-e2e@example.invalid' commit -m 'Prepare disposable live E2E workspace'
+```
+
+Register that directory in the platform UI, register/pull the selected Ollama model, and create an API key for the account that owns the repository. Set the repository ID and path to the values returned by the running service (`/workspace/live-e2e` for Compose; the local path when running directly):
+
+```bash
+export LAP_E2E_BASE_URL='http://localhost:8080'
+export LAP_E2E_API_KEY='lap_...' # do not commit or print this value
+export LAP_E2E_REPOSITORY_ID='<UUID from GET /api/repositories>'
+export LAP_E2E_MODEL_ID='llama3.2:3b' # exact registered Ollama modelId
+export LAP_E2E_SERVER_REPOSITORY_PATH='/workspace/live-e2e'
+export LAP_E2E_LOCAL_REPOSITORY_PATH="$PWD/workspace/live-e2e"
+export LAP_E2E_CONFIRM_DISPOSABLE_REPOSITORY='I_CONFIRM_THIS_REPOSITORY_IS_DISPOSABLE'
+export LAP_E2E_ALLOW_BUILD_AND_TEST='I_APPROVE_BUILD_AND_TEST'
+node scripts/run-live-platform-e2e.js
+```
+
+Remote platform URLs must use HTTPS; plain HTTP is limited to loopback. The harness refuses non-fixture contents, a dirty Git worktree, unexpected model-planned tools, other file writes, and any approval other than the platform's exact system-generated BuildTool/TestTool verification tasks. It removes its unique marker file only after a fully successful run; failures preserve workspace changes for inspection. The agent session/audit data and ignored `bin/`/`obj/` outputs remain. The harness safety/unit tests run in CI, but an actual live-platform run still requires an operator's reachable PostgreSQL/Ollama-backed instance and has not been verified in this environment.
+
 ## Load/performance testing
 
 Install k6 and create an API key from the UI, then:
@@ -362,7 +395,7 @@ Production secrets remain outside the repository and should be supplied through 
 - Cross-file relationship generation is bounded to avoid unbounded indexing cost on very large repositories.
 - The semantic memory vector is currently stored as JSON for provider/database portability rather than requiring `pgvector`. For very large memory stores, migrate to `pgvector` or another ANN index.
 - NVIDIA and ROCm telemetry depend on vendor CLIs being installed and visible to the application process.
-- The VS Code extension has 23 passing Node API-client/command-flow/manifest/filesystem-safety tests and packages successfully as a VSIX. The VS Code Extension Host smoke test passes in GitHub Actions; local VS Code download was blocked by a TLS failure. Live-platform end-to-end testing remains outstanding.
+- The VS Code extension has 23 passing Node API-client/command-flow/manifest/filesystem-safety tests and packages successfully as a VSIX. The VS Code Extension Host smoke test passes in GitHub Actions; local VS Code download was blocked by a TLS failure. An opt-in live platform/API session E2E harness is implemented and its guard tests run in CI, but it has not yet been executed against a live app/model. The extension itself has not been exercised against a live platform.
 - The baseline migration and snapshot are checked in. CI now rejects a missing migration, detects model/snapshot drift, and applies the migration to a fresh PostgreSQL database before integration testing. Existing pre-migration `EnsureCreatedAsync()` databases still require a backed-up, explicit adoption cutover.
 
 ## Documentation

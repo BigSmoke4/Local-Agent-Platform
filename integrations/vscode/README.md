@@ -66,4 +66,4 @@ xvfb-run -a npm run test:extension-host
 npm run test:extension-host
 ```
 
-The Extension Host test downloads VS Code if it is not already cached. These tests still do not replace an end-to-end test against a running platform.
+The Extension Host test downloads VS Code if it is not already cached. These tests still do not replace an end-to-end test against a running platform. The repository's opt-in [`scripts/run-live-platform-e2e.js`](../../scripts/run-live-platform-e2e.js) exercises the real authenticated platform API, Ollama-backed agent session, and tool/verification pipeline using a pinned disposable workspace; it does not launch VS Code, so live extension UI behavior remains unverified.

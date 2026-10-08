@@ -18,7 +18,8 @@ This file is the authoritative status ledger for the current repository. “Impl
 | Workspace-root allowlist | Implemented, CI-tested | Registration, repository/session listings, MVC/API operations, tool execution, indexing, context, verification, IDE open, and session telemetry enforce configured roots; default is fail-closed and Compose allows `/workspace`. Unit/integration tests pass in CI; filesystem race resistance still depends on OS/container isolation. |
 | Symlink-aware workspace containment | Implemented, CI-tested | Shared path containment rejects workspace escapes through symlink/reparse-point segments; configured allowlist roots are snapshotted as physical paths; a repository root itself may not be a link, and symlink ancestors are canonicalized for containment. Linux filesystem tests pass in CI. |
 | Container privilege hardening | Image build and hardened runtime CI-tested | CI builds the image, starts it against PostgreSQL with all capabilities dropped except `CHOWN`, `SETUID`, and `SETGID`, and confirms `/health/live` succeeds while PID 1 runs as UID `1000`. Compose runtime itself has not been exercised. Tool subprocesses still share the web UID/namespace and are not a hostile-code sandbox. |
-| IDE integration | Implemented, partially verified | Server-side VS Code CLI provider remains available. A standalone VS Code extension under `integrations/vscode` stores its API key in SecretStorage and supports repository/model discovery, session start/list, task inspection, one-time approval, cancellation, changed-file listing, and safe opening through the session repository ID plus configured server-to-local mapping. Its 23 Node tests pass, VSIX packaging succeeds, and its Extension Host smoke test passes in GitHub Actions. A live-platform end-to-end test has not run. |
+| IDE integration | Implemented, partially verified | Server-side VS Code CLI provider remains available. A standalone VS Code extension under `integrations/vscode` stores its API key in SecretStorage and supports repository/model discovery, session start/list, task inspection, one-time approval, cancellation, changed-file listing, and safe opening through the session repository ID plus configured server-to-local mapping. Its 23 Node tests pass, VSIX packaging succeeds, and its Extension Host smoke test passes in GitHub Actions. The extension has not been exercised against a live platform. |
+| Live platform/API end-to-end harness | Implemented, opt-in; not yet live-verified | `scripts/run-live-platform-e2e.js` calls a real authenticated platform, starts a real Ollama-backed session in a pinned disposable fixture, checks the persisted tasks and exact file mutation, then requires explicit opt-in before approving only the system BuildTool/TestTool verification tasks. CI tests the harness guards and fixture, but no live app/model run has occurred. |
 | Roles | Implemented | `Admin` and `User`; first user is Admin. |
 | MFA | Implemented | TOTP with Data Protection-protected secrets. |
 | Password recovery | Implemented | One-time recovery code, hashed at rest and rotated after reset. |
@@ -28,7 +29,7 @@ This file is the authoritative status ledger for the current repository. “Impl
 | Security/concurrency regression tests | Added, CI-verified | Domain and PostgreSQL integration suites pass in GitHub Actions, covering terminal/Git/file mutation, symlink/workspace boundaries, DAG validation, repository traversal, secret redaction, regex scanning, verified test summaries, failed-task propagation, cross-worker claim/cancellation, corrupt persisted task metadata, and file deletion/reappearance. |
 | Real Ollama HTTP test | Implemented, opt-in | Performs actual model-list and generation HTTP requests. It is explicitly skipped—not passed—unless `LAP_RUN_LIVE_TESTS=1`; a live Ollama endpoint and pulled model are required. No live model call was made in the latest CI run. |
 | Load-test suite | Implemented | k6 API/health scenario with thresholds; requires k6 and a running instance. |
-| CI | Implemented, verified in GitHub Actions | 23 VS Code Node tests, VS Code Extension Host smoke test, .NET Release build, Domain tests, PostgreSQL integration tests, EF model-snapshot validation and migration against fresh PostgreSQL, Docker image build, and a hardened PostgreSQL-backed runtime smoke test (live health plus UID `1000`) passed in [GitHub Actions](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37739446126). |
+| CI | Implemented, verified in GitHub Actions | The previous completed run, [37741509663](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37741509663), passed the .NET Release build, Domain/PostgreSQL integration tests, EF model-snapshot validation and fresh-PostgreSQL migration, VS Code tests, Docker build, and hardened PostgreSQL-backed runtime smoke. The newly added live-E2E harness guard tests and disposable fixture are pending their first CI run. |
 | CD | Implemented/configurable | GHCR publish; optional SSH production deploy and readiness gate. |
 | Fresh-schema bootstrap | Implemented, CI-tested | Startup applies committed EF migrations with `MigrateAsync()`. CI verifies the model snapshot and applies the baseline to clean PostgreSQL; only Development can fall back to `EnsureCreatedAsync()` if migrations are absent. |
 
@@ -38,6 +39,7 @@ This file is the authoritative status ledger for the current repository. “Impl
 - `nvidia-smi` and `rocm-smi` must be installed/visible for NVIDIA/AMD telemetry respectively.
 - `nomic-embed-text` (or the configured embedding model) must be pulled for semantic memory; lexical fallback works without it.
 - Live Ollama tests require an actual Ollama instance and coding model.
+- The opt-in live platform/API E2E harness requires a reachable running app backed by PostgreSQL and Ollama, an owner-scoped API key, a registered model/repository, Node.js 18+, Git, and an exact clean copy of `tests/fixtures/live-platform-e2e/`. It executes the real agent session and, only after an explicit environment opt-in, approves the fixture's system BuildTool/TestTool tasks. The harness has not yet been run against a live platform.
 - SSH CD requires a configured GitHub `production` environment and deployment secrets.
 - k6 load tests require k6 and a running instance.
 
@@ -60,10 +62,12 @@ Databases previously initialized with `EnsureCreatedAsync()` do not have an `__E
 ```bash
 npm ci --prefix integrations/vscode
 npm --prefix integrations/vscode test
+node --test tests/live-platform-e2e.test.js
 xvfb-run -a npm --prefix integrations/vscode run test:extension-host
 npx --yes @vscode/vsce package --no-dependencies --out /tmp/local-agent-platform.vsix
 dotnet restore src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
 dotnet build src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj -c Release
+dotnet test tests/fixtures/live-platform-e2e/Disposable.csproj -c Release
 dotnet test tests/LocalAgentPlatform.Domain.Tests/LocalAgentPlatform.Domain.Tests.csproj -c Release
 dotnet test tests/LocalAgentPlatform.Integration.Tests/LocalAgentPlatform.Integration.Tests.csproj -c Release
 docker build -t local-agent-platform:ci .
