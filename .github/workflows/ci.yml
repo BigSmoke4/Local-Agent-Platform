@@ -288,15 +288,21 @@ jobs:
           test "$process_uid" = "1000" || runtime_smoke_failure "PID 1 UID was '$process_uid', expected 1000."
           keyring_state="$(docker exec lap-runtime-smoke stat -c '%a:%u:%g' /var/lib/local-agent-platform/keyring)"
           test "$keyring_state" = "700:1000:1000" || runtime_smoke_failure "Key-ring directory state was '$keyring_state', expected 700:1000:1000."
-          login_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+          if ! login_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
             --header 'Host: lap-ci.example.test' \
             --header 'X-Forwarded-For: 192.0.2.10' \
             --header 'X-Forwarded-Proto: https' \
-            http://127.0.0.1:18080/Account/Login)"
+            http://127.0.0.1:18080/Account/Login)"; then
+            runtime_smoke_failure 'GET /Account/Login could not connect to the production smoke container.'
+          fi
           test "$login_status" = "200" || runtime_smoke_failure "GET /Account/Login returned HTTP $login_status, expected 200."
-          key_file="$(docker exec lap-runtime-smoke find /var/lib/local-agent-platform/keyring -maxdepth 1 -type f -name 'key-*.xml' -print -quit)"
+          if ! key_file="$(docker exec --user app lap-runtime-smoke find /var/lib/local-agent-platform/keyring -maxdepth 1 -type f -name 'key-*.xml' -print -quit)"; then
+            runtime_smoke_failure 'The app user could not enumerate the Data Protection key ring.'
+          fi
           test -n "$key_file" || runtime_smoke_failure "No Data Protection key file was created by the login-page request."
-          key_file_state="$(docker exec lap-runtime-smoke stat -c '%a:%u:%g' "$key_file")"
+          if ! key_file_state="$(docker exec --user app lap-runtime-smoke stat -c '%a:%u:%g' "$key_file")"; then
+            runtime_smoke_failure 'The app user could not inspect its Data Protection key file.'
+          fi
           test "$key_file_state" = "600:1000:1000" || runtime_smoke_failure "Data Protection key file state was '$key_file_state', expected 600:1000:1000."
           rejected_host_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --header 'Host: attacker.example.invalid' http://127.0.0.1:18080/health/live)"
