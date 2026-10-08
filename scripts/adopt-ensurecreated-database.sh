@@ -337,6 +337,20 @@ dump_public_schema() {
     --no-publications --no-subscriptions --schema=public \
     --exclude-table='public."__EFMigrationsHistory"' \
     --file="$output" --dbname="$uri"
+  # PostgreSQL 17+ emits a per-dump random psql \\restrict/\\unrestrict key.
+  # It is execution protection, not schema, so omit only those exact guard lines
+  # from these schema-only comparison artifacts (never from the physical backup).
+  python3 - "$output" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+lines = text.splitlines(keepends=True)
+guard = re.compile(r"\\(?:un)?restrict[ \t]+[^ \t\r\n]+(?:\r?\n)?")
+path.write_text("".join(line for line in lines if not guard.fullmatch(line)), encoding="utf-8")
+PY
 }
 
 compare_schema_or_refuse() {
