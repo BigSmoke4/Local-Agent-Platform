@@ -187,7 +187,7 @@ dotnet ef migrations add AddYourFeature \
   --output-dir Migrations
 ```
 
-Existing installations created before the baseline with `EnsureCreatedAsync()` have no `__EFMigrationsHistory` row. Back up and verify their schema before any migration deployment; applying the initial migration directly will fail because its tables already exist. Baseline adoption is a manual cutover and is not automated yet.
+Existing installations created before the baseline with `EnsureCreatedAsync()` have no `__EFMigrationsHistory` row. Applying the initial migration directly will fail because its tables already exist. An opt-in draft helper at `scripts/adopt-ensurecreated-database.sh` is exercised in CI only against a disposable PostgreSQL fixture: it creates a protected backup, restores it in a scratch database, refuses schema mismatches, and applies the baseline history transactionally for the exact fixture schema. This validates the tested fixture paths, not real installations, credentials, extensions, or operational conditions. The helper is not a supported production procedure; do not run it against valuable/live data. Any real baseline-adoption cutover remains operator-managed and requires independent backup/restore verification and review.
 
 ## Run directly
 

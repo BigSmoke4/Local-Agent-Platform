@@ -1,6 +1,7 @@
 using LocalAgentPlatform.Shared.Data;
 using LocalAgentPlatform.Shared.Data.Entities;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Xunit;
 
 namespace LocalAgentPlatform.Integration.Tests;
@@ -28,8 +29,14 @@ public sealed class EnsureCreatedAdoptionFixtureTests
         if (string.IsNullOrWhiteSpace(connectionString))
             throw new InvalidOperationException("ConnectionStrings__PlatformDb must point to an empty disposable database.");
 
+        // The adoption helper requires exclusive access; avoid retaining an idle pooled
+        // backend after the fixture context closes on the test host.
+        var fixtureConnectionString = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            Pooling = false
+        }.ConnectionString;
         var options = new DbContextOptionsBuilder<PlatformDbContext>()
-            .UseNpgsql(connectionString)
+            .UseNpgsql(fixtureConnectionString)
             .Options;
         await using var db = new PlatformDbContext(options);
 
