@@ -63,27 +63,32 @@ jobs:
           set -o pipefail
           bash -x ./scripts/create-baseline-migration.sh 2>&1 | tee ef-baseline.log
 
-      - name: Expose generated baseline source for review
+      - name: Expose generated baseline archive via check annotations
         if: steps.ef-baseline.outcome == 'success'
         run: |
           python3 - <<'PY'
           import base64
+          import io
           import json
           from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
 
           migration_dir = Path('src/Shared/Data/Migrations')
-          for migration_file in sorted(migration_dir.glob('*.cs')):
-              encoded = base64.b64encode(migration_file.read_bytes()).decode('ascii')
-              chunk_size = 5000
-              chunks = [encoded[i:i + chunk_size] for i in range(0, len(encoded), chunk_size)]
-              for index, chunk in enumerate(chunks, start=1):
-                  message = json.dumps({
-                      'file': migration_file.as_posix(),
-                      'part': index,
-                      'parts': len(chunks),
-                      'base64': chunk,
-                  }, separators=(',', ':'))
-                  print(f'::notice title=EF_BASELINE_SOURCE::{message}')
+          migration_files = sorted(migration_dir.glob('*.cs'))
+          archive_buffer = io.BytesIO()
+          with ZipFile(archive_buffer, 'w', compression=ZIP_DEFLATED) as archive:
+              for migration_file in migration_files:
+                  archive.write(migration_file, migration_file.name)
+          encoded = base64.b64encode(archive_buffer.getvalue()).decode('ascii')
+          chunk_size = 3000
+          chunks = [encoded[i:i + chunk_size] for i in range(0, len(encoded), chunk_size)]
+          for index, chunk in enumerate(chunks, start=1):
+              message = json.dumps({
+                  'part': index,
+                  'parts': len(chunks),
+                  'base64': chunk,
+              }, separators=(',', ':'))
+              print(f'::notice title=EF_BASELINE_ARCHIVE::{message}')
           PY
 
       - name: Build
