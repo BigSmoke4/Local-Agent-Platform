@@ -28,9 +28,9 @@ This file is the authoritative status ledger for the current repository. “Impl
 | Security/concurrency regression tests | Added, CI-verified | Domain and PostgreSQL integration suites pass in GitHub Actions, covering terminal/Git/file mutation, symlink/workspace boundaries, DAG validation, repository traversal, secret redaction, regex scanning, verified test summaries, failed-task propagation, cross-worker claim/cancellation, corrupt persisted task metadata, and file deletion/reappearance. |
 | Real Ollama HTTP test | Implemented, opt-in | Enabled with `LAP_RUN_LIVE_TESTS=1`; requires a live Ollama instance. |
 | Load-test suite | Implemented | k6 API/health scenario with thresholds; requires k6 and a running instance. |
-| CI | Implemented, verified in GitHub Actions | 23 VS Code Node tests, VS Code Extension Host smoke test, .NET Release build, Domain tests, PostgreSQL integration tests, temporary EF baseline generation/artifact publication, Docker image build, and a hardened PostgreSQL-backed runtime smoke test (live health plus UID `1000`) passed in [GitHub Actions](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37735619610). |
+| CI | Implemented, verified in GitHub Actions | 23 VS Code Node tests, VS Code Extension Host smoke test, .NET Release build, Domain tests, PostgreSQL integration tests, EF model-snapshot validation and migration against fresh PostgreSQL, Docker image build, and a hardened PostgreSQL-backed runtime smoke test (live health plus UID `1000`) passed in [GitHub Actions](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37739001366). |
 | CD | Implemented/configurable | GHCR publish; optional SSH production deploy and readiness gate. |
-| Fresh-schema bootstrap | Implemented | Startup uses `EnsureCreatedAsync()` only when no EF migrations exist; otherwise `MigrateAsync()`. |
+| Fresh-schema bootstrap | Implemented, CI-tested | Startup applies committed EF migrations with `MigrateAsync()`. CI verifies the model snapshot and applies the baseline to clean PostgreSQL; only Development can fall back to `EnsureCreatedAsync()` if migrations are absent. |
 
 ## Environment-dependent verification
 
@@ -51,9 +51,9 @@ This file is the authoritative status ledger for the current repository. “Impl
 
 ## Schema migration status
 
-CI successfully generated and compiled the baseline migration, ran the build/tests against it, and published a temporary [`ef-migration-baseline` artifact](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37735619610#artifacts). The migration is not committed to the repository yet. For production schema evolution, review that artifact (or run `./scripts/create-baseline-migration.sh` with the .NET 8 SDK) and commit the migration/snapshot. Once committed, startup switches to `Database.MigrateAsync()` for fresh and existing databases.
+The generated EF Core baseline is committed in `src/Shared/Data/Migrations/` (migration, designer, and model snapshot). CI verifies that the snapshot matches the current model and applies the migration to a clean PostgreSQL database; the Docker runtime smoke test also starts the application against a fresh PostgreSQL service. New installations use `Database.MigrateAsync()` at startup. Non-Development environments fail closed rather than silently creating an unmanaged schema when migrations are missing.
 
-The sandbox lacks the .NET SDK. Attempts to retrieve the generated artifact and job logs from GitHub's Actions storage endpoints failed with `EOF`, so the generated migration files have not been brought into this checkout. Fresh installs still work through `EnsureCreatedAsync()` until the baseline is reviewed and committed.
+Databases previously initialized with `EnsureCreatedAsync()` do not have an `__EFMigrationsHistory` row. Do not deploy this baseline directly onto such a database: EF will try to create tables that already exist. Back up and verify the schema, then perform an explicit baseline-adoption cutover before applying future migrations. No automatic adoption procedure is included yet; pre-migration installations still require a deliberate cutover.
 
 ## Reproducible validation commands
 

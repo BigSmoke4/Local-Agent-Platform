@@ -104,7 +104,7 @@ Tool execution includes:
 - Serilog structured logging.
 - OpenTelemetry ASP.NET Core/HTTP tracing.
 - Dockerfile + Docker Compose.
-- GitHub Actions CI for VS Code Node and Extension Host tests, .NET restore/build/unit/PostgreSQL integration tests, EF baseline generation, Docker image build, and a hardened PostgreSQL-backed container runtime smoke test (live health and non-root UID).
+- GitHub Actions CI for VS Code Node and Extension Host tests, .NET restore/build/unit/PostgreSQL integration tests, EF model-snapshot validation and migration against fresh PostgreSQL, Docker image build, and a hardened container runtime smoke test (live health and non-root UID).
 - **GitHub Actions CD** publishes images to GHCR and can deploy over SSH to a protected `production` environment when deployment variables/secrets are configured.
 
 ## Repository layout
@@ -171,13 +171,22 @@ Open:
 http://localhost:8080
 ```
 
-Until an EF baseline is committed, a brand-new database bootstraps with `EnsureCreatedAsync()`. CI generates the baseline as an artifact when it is missing; review and commit that migration/snapshot before production schema evolution. You can also generate it locally with the .NET 8 SDK:
+## EF Core migrations
+
+The initial migration, designer, and model snapshot are committed under `src/Shared/Data/Migrations/`. Application startup applies pending migrations with `Database.MigrateAsync()`. CI verifies that the snapshot matches the current model, applies the baseline to a clean PostgreSQL database, and runs the integration suite against that database. Non-Development environments fail closed if the migration assembly is unexpectedly empty; only Development retains `EnsureCreatedAsync()` as a fallback.
+
+Create future migrations from the repository root with the .NET 8 SDK:
 
 ```bash
-./scripts/create-baseline-migration.sh
+dotnet tool restore
+dotnet ef migrations add AddYourFeature \
+  --context PlatformDbContext \
+  --project src/Shared/Data/Shared.Data.csproj \
+  --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj \
+  --output-dir Migrations
 ```
 
-After a migration is committed, startup automatically uses `Database.MigrateAsync()`.
+Existing installations created before the baseline with `EnsureCreatedAsync()` have no `__EFMigrationsHistory` row. Back up and verify their schema before any migration deployment; applying the initial migration directly will fail because its tables already exist. Baseline adoption is a manual cutover and is not automated yet.
 
 ## Run directly
 
@@ -354,7 +363,7 @@ Production secrets remain outside the repository and should be supplied through 
 - The semantic memory vector is currently stored as JSON for provider/database portability rather than requiring `pgvector`. For very large memory stores, migrate to `pgvector` or another ANN index.
 - NVIDIA and ROCm telemetry depend on vendor CLIs being installed and visible to the application process.
 - The VS Code extension has 23 passing Node API-client/command-flow/manifest/filesystem-safety tests and packages successfully as a VSIX. The VS Code Extension Host smoke test passes in GitHub Actions; local VS Code download was blocked by a TLS failure. Live-platform end-to-end testing remains outstanding.
-- CI can generate and publish a temporary EF baseline migration artifact when none is committed; review and check that baseline into source control before treating schema evolution as production-ready. The artifact and Actions logs could not be downloaded from this sandbox because GitHub's Actions storage endpoint returned `EOF`; the baseline remains uncommitted.
+- The baseline migration and snapshot are checked in. CI now rejects a missing migration, detects model/snapshot drift, and applies the migration to a fresh PostgreSQL database before integration testing. Existing pre-migration `EnsureCreatedAsync()` databases still require a backed-up, explicit adoption cutover.
 
 ## Documentation
 
