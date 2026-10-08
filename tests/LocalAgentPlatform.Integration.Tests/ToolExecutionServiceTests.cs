@@ -1,5 +1,6 @@
 using LocalAgentPlatform.Modules.Tools.Infrastructure.Tools;
 using LocalAgentPlatform.Shared.Data.Entities;
+using LocalAgentPlatform.Shared.Kernel.Files;
 using LocalAgentPlatform.Shared.Kernel.Tools;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -45,14 +46,15 @@ public class ToolExecutionServiceTests : IDisposable
         var repositoryId = await RegisterRepositoryAsync(db);
 
         ITool[] tools = { new FileReadTool() };
-        var service = new ToolExecutionServiceType(tools, db, new LocalAgentPlatform.Modules.Tools.Application.Services.CommandPermissionService(db), NullLogger<ToolExecutionServiceType>.Instance);
+        var service = new ToolExecutionServiceType(tools, db, new LocalAgentPlatform.Modules.Tools.Application.Services.CommandPermissionService(db), NullLogger<ToolExecutionServiceType>.Instance, new WorkspaceRootPolicy(new[] { _tempRepoPath }));
 
         var outcome = await service.InvokeAsync(
             "FileReadTool", repositoryId, new Dictionary<string, string> { ["path"] = "notes.txt" }, approved: true);
 
         Assert.Equal("Allowed", outcome.Decision);
         Assert.True(outcome.Result?.Success);
-        Assert.Equal("hello from disk", outcome.Result!.Output);
+        Assert.Contains("SHA-256:", outcome.Result!.Output);
+        Assert.Contains("hello from disk", outcome.Result.Output);
 
         var auditRow = await db.ToolExecutions.FirstOrDefaultAsync(e => e.Id == outcome.ExecutionId);
         Assert.NotNull(auditRow);
@@ -67,7 +69,7 @@ public class ToolExecutionServiceTests : IDisposable
         var repositoryId = await RegisterRepositoryAsync(db);
 
         ITool[] tools = { new FileReadTool() };
-        var service = new ToolExecutionServiceType(tools, db, new LocalAgentPlatform.Modules.Tools.Application.Services.CommandPermissionService(db), NullLogger<ToolExecutionServiceType>.Instance);
+        var service = new ToolExecutionServiceType(tools, db, new LocalAgentPlatform.Modules.Tools.Application.Services.CommandPermissionService(db), NullLogger<ToolExecutionServiceType>.Instance, new WorkspaceRootPolicy(new[] { _tempRepoPath }));
 
         var outcome = await service.InvokeAsync(
             "FileReadTool", repositoryId, new Dictionary<string, string> { ["path"] = "../../etc/passwd" }, approved: true);
@@ -83,9 +85,36 @@ public class ToolExecutionServiceTests : IDisposable
         var repositoryId = await RegisterRepositoryAsync(db);
 
         ITool[] tools = { new FileReadTool() };
-        var service = new ToolExecutionServiceType(tools, db, new LocalAgentPlatform.Modules.Tools.Application.Services.CommandPermissionService(db), NullLogger<ToolExecutionServiceType>.Instance);
+        var service = new ToolExecutionServiceType(tools, db, new LocalAgentPlatform.Modules.Tools.Application.Services.CommandPermissionService(db), NullLogger<ToolExecutionServiceType>.Instance, new WorkspaceRootPolicy(new[] { _tempRepoPath }));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             service.InvokeAsync("NoSuchTool", repositoryId, new Dictionary<string, string>(), approved: true));
+    }
+
+    [Fact]
+    public async Task Persistent_always_allow_does_not_bypass_high_risk_terminal_gate()
+    {
+        await using var db = _fixture.CreateContext();
+        var ownerId = Guid.NewGuid();
+        var project = new Project { Name = $"TerminalPermissionProject-{Guid.NewGuid()}", OwnerUserId = ownerId };
+        var repository = new Repository { Project = project, LocalPath = _tempRepoPath };
+        db.Projects.Add(project);
+        db.Repositories.Add(repository);
+        await db.SaveChangesAsync();
+
+        var permissions = new LocalAgentPlatform.Modules.Tools.Application.Services.CommandPermissionService(db);
+        await permissions.SetAsync(ownerId, "my-local-tool", LocalAgentPlatform.Modules.Tools.Application.Services.PersistedCommandDecision.AlwaysAllow);
+        ITool[] tools = { new TerminalTool(NullLogger<TerminalTool>.Instance) };
+        var service = new ToolExecutionServiceType(
+            tools, db, permissions, NullLogger<ToolExecutionServiceType>.Instance,
+            new WorkspaceRootPolicy(new[] { _tempRepoPath }));
+
+        var outcome = await service.InvokeAsync(
+            "TerminalTool", repository.Id,
+            new Dictionary<string, string> { ["command"] = "my-local-tool --version" },
+            approved: false, ownerUserId: ownerId);
+
+        Assert.Equal("PendingApproval", outcome.Decision);
+        Assert.Null(outcome.Result);
     }
 }

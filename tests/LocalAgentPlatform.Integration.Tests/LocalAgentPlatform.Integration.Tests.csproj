@@ -17,6 +17,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Shared\Data\Shared.Data.csproj" />
+    <ProjectReference Include="..\..\src\Modules\Agent\Application\Agent.Application.csproj" />
     <ProjectReference Include="..\..\src\Modules\Models\Application\Models.Application.csproj" />
     <ProjectReference Include="..\..\src\Modules\Models\Infrastructure\Models.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\Shared\Kernel\Shared.Kernel.csproj" />
@@ -25,5 +26,6 @@
     <ProjectReference Include="..\..\src\Modules\Tools\Application\Tools.Application.csproj" />
     <ProjectReference Include="..\..\src\Modules\Tools\Infrastructure\Tools.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\Modules\Memory\Application\Memory.Application.csproj" />
+    <ProjectReference Include="..\..\src\Modules\Verification\Infrastructure\Verification.Infrastructure.csproj" />
   </ItemGroup>
 </Project>

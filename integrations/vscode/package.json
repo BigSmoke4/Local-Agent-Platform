@@ -1,0 +1,177 @@
+{
+  "name": "local-agent-platform-vscode",
+  "displayName": "Local Agent Platform",
+  "description": "Start, monitor, approve, and cancel local coding-agent sessions from VS Code.",
+  "version": "0.1.0",
+  "publisher": "localagentplatform",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BigSmoke4/Local-Agent-Platform.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "scripts": {
+    "test": "node --test test/api-client.test.js test/extension-commands.test.js test/extension-manifest.test.js test/repository-files.test.js test/session-files.test.js",
+    "test:extension-host": "node test/run-extension-host.js"
+  },
+  "activationEvents": [
+    "onView:localAgentPlatform.sessions",
+    "onCommand:localAgentPlatform.configureApiKey",
+    "onCommand:localAgentPlatform.clearApiKey",
+    "onCommand:localAgentPlatform.startSession",
+    "onCommand:localAgentPlatform.openRepository",
+    "onCommand:localAgentPlatform.openRepositoryFile",
+    "onCommand:localAgentPlatform.openChangedFile",
+    "onCommand:localAgentPlatform.refreshSessions"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Local Agent Platform",
+      "properties": {
+        "localAgentPlatform.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "Base URL of the local agent platform. Use HTTPS if connecting beyond the local machine."
+        },
+        "localAgentPlatform.repositoryPathMappings": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "Optional mappings from repository paths returned by the server to local paths visible to VS Code. Longest `serverRoot` match wins. Example: `[{\"serverRoot\":\"/workspace\",\"localRoot\":\"/home/me/project-workspace\"}]`. This only affects opening local folders/files; session API actions continue using server repository IDs.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "serverRoot",
+              "localRoot"
+            ],
+            "properties": {
+              "serverRoot": {
+                "type": "string",
+                "description": "Absolute repository root as returned by the API server."
+              },
+              "localRoot": {
+                "type": "string",
+                "description": "Absolute local directory visible to the VS Code extension host."
+              }
+            }
+          }
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "localAgentPlatform.configureApiKey",
+        "title": "Local Agent Platform: Configure API Key"
+      },
+      {
+        "command": "localAgentPlatform.clearApiKey",
+        "title": "Local Agent Platform: Clear Stored API Key"
+      },
+      {
+        "command": "localAgentPlatform.startSession",
+        "title": "Local Agent Platform: Start Coding Session"
+      },
+      {
+        "command": "localAgentPlatform.openRepository",
+        "title": "Local Agent Platform: Open Allowed Repository"
+      },
+      {
+        "command": "localAgentPlatform.openRepositoryFile",
+        "title": "Local Agent Platform: Open File in Allowed Repository"
+      },
+      {
+        "command": "localAgentPlatform.refreshSessions",
+        "title": "Local Agent Platform: Refresh Sessions"
+      },
+      {
+        "command": "localAgentPlatform.showSession",
+        "title": "Local Agent Platform: Show Session Summary"
+      },
+      {
+        "command": "localAgentPlatform.showTask",
+        "title": "Local Agent Platform: Show Task Details"
+      },
+      {
+        "command": "localAgentPlatform.openChangedFile",
+        "title": "Local Agent Platform: Open Changed File"
+      },
+      {
+        "command": "localAgentPlatform.approveTask",
+        "title": "Local Agent Platform: Approve Task"
+      },
+      {
+        "command": "localAgentPlatform.cancelSession",
+        "title": "Local Agent Platform: Cancel Session"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "localAgentPlatform.sessions",
+          "name": "Local Agent Platform"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "localAgentPlatform.startSession",
+          "when": "view == localAgentPlatform.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "localAgentPlatform.refreshSessions",
+          "when": "view == localAgentPlatform.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "localAgentPlatform.openRepository",
+          "when": "view == localAgentPlatform.sessions",
+          "group": "navigation@3"
+        },
+        {
+          "command": "localAgentPlatform.openRepositoryFile",
+          "when": "view == localAgentPlatform.sessions",
+          "group": "navigation@4"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "localAgentPlatform.showSession",
+          "when": "view == localAgentPlatform.sessions && viewItem == lapSession",
+          "group": "inline@1"
+        },
+        {
+          "command": "localAgentPlatform.showSession",
+          "when": "view == localAgentPlatform.sessions && viewItem == lapCancellableSession",
+          "group": "inline@1"
+        },
+        {
+          "command": "localAgentPlatform.cancelSession",
+          "when": "view == localAgentPlatform.sessions && viewItem == lapCancellableSession",
+          "group": "inline@2"
+        },
+        {
+          "command": "localAgentPlatform.showTask",
+          "when": "view == localAgentPlatform.sessions && viewItem == lapTask",
+          "group": "inline@1"
+        },
+        {
+          "command": "localAgentPlatform.approveTask",
+          "when": "view == localAgentPlatform.sessions && viewItem == lapApproval",
+          "group": "inline@2"
+        }
+      ]
+    }
+  },
+  "devDependencies": {
+    "@vscode/test-electron": "^3.1.0",
+    "mocha": "^12.0.3"
+  }
+}

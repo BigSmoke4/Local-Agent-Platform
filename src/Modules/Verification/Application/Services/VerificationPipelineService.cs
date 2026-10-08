@@ -1,9 +1,11 @@
 using System.Text.Json;
-using LocalAgentPlatform.Modules.Tools.Application.Services;
 using LocalAgentPlatform.Modules.Verification.Domain;
+using LocalAgentPlatform.Modules.RepositoryAnalysis.Infrastructure;
 using LocalAgentPlatform.Modules.Verification.Infrastructure.Security;
 using LocalAgentPlatform.Shared.Data;
 using LocalAgentPlatform.Shared.Data.Entities;
+using LocalAgentPlatform.Shared.Kernel.Files;
+using LocalAgentPlatform.Shared.Kernel.Tools;
 using Microsoft.EntityFrameworkCore;
 
 namespace LocalAgentPlatform.Modules.Verification.Application.Services;
@@ -17,60 +19,85 @@ namespace LocalAgentPlatform.Modules.Verification.Application.Services;
 /// </summary>
 public sealed class VerificationPipelineService
 {
-    private readonly ToolExecutionService _toolExecutionService;
     private readonly ISecurityPatternScanner _securityScanner;
     private readonly PlatformDbContext _db;
+    private readonly IWorkspaceRootPolicy _workspacePolicy;
+    private readonly IRepositoryFileScanner _fileScanner;
 
-    private static readonly string[] ScannableExtensions = { ".cs", ".json", ".config" };
+    private static readonly HashSet<string> ScannableExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".cs", ".csx", ".razor", ".cshtml", ".fs", ".fsx", ".fsproj", ".vb", ".vbproj", ".csproj",
+        ".props", ".targets", ".sln", ".slnx", ".json", ".config", ".xml", ".js", ".jsx", ".ts", ".tsx",
+        ".vue", ".svelte", ".py", ".php", ".rb", ".go", ".rs", ".c", ".h", ".cc", ".cpp", ".hpp",
+        ".java", ".kt", ".kts", ".scala", ".swift", ".dart", ".sql", ".yml", ".yaml", ".toml", ".ini",
+        ".properties", ".gradle", ".sh", ".bash", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".tf",
+        ".hcl", ".html", ".htm", ".md", ".txt", ".proto", ".graphql", ".gql", ".cmake", ".mk", ".pem", ".key"
+    };
+
+    private static readonly HashSet<string> ScannableExtensionlessNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".env", ".gitconfig", ".npmrc", ".pypirc", ".netrc", ".dockerignore", ".editorconfig",
+        "Dockerfile", "Containerfile", "Makefile", "Jenkinsfile", "Procfile", "CMakeLists.txt",
+        "WORKSPACE", "BUILD", "Justfile", "Vagrantfile", "Gemfile", "Rakefile", "Brewfile"
+    };
 
     public VerificationPipelineService(
-        ToolExecutionService toolExecutionService, ISecurityPatternScanner securityScanner, PlatformDbContext db)
+        ISecurityPatternScanner securityScanner,
+        PlatformDbContext db,
+        IWorkspaceRootPolicy workspacePolicy,
+        IRepositoryFileScanner fileScanner)
     {
-        _toolExecutionService = toolExecutionService;
         _securityScanner = securityScanner;
         _db = db;
+        _workspacePolicy = workspacePolicy;
+        _fileScanner = fileScanner;
     }
 
-    public async Task<VerificationRun> RunAsync(Guid sessionId, Guid repositoryId, int repairAttemptNumber, bool runTests, CancellationToken ct = default)
+    public async Task<VerificationRun> RunAsync(
+        Guid sessionId,
+        Guid repositoryId,
+        int repairAttemptNumber,
+        bool runTests,
+        ToolExecutionResult approvedBuildResult,
+        ToolExecutionResult? approvedTestResult = null,
+        CancellationToken ct = default)
     {
+        ArgumentNullException.ThrowIfNull(approvedBuildResult);
+        if (runTests && approvedBuildResult.Success && approvedTestResult is null)
+            throw new InvalidOperationException("Test verification requires an approved, real TestTool result.");
+
         var run = new VerificationRun { AgentSessionId = sessionId, RepairAttemptNumber = repairAttemptNumber };
 
-        // ---- Build (real dotnet build via BuildTool) ----
-        var buildOutcome = await _toolExecutionService.InvokeAsync(
-            "BuildTool", repositoryId, new Dictionary<string, string>(), approved: true, ct);
-        var buildText = (buildOutcome.Result?.Output ?? "") + "\n" + (buildOutcome.Result?.Error ?? "");
+        // Build/test are user-approved tool executions. The pipeline consumes their
+        // real results; it never launches repository-controlled code behind the user's back.
+        var buildText = (approvedBuildResult.Output ?? "") + "\n" + (approvedBuildResult.Error ?? "");
         var buildParsed = BuildOutputParser.Parse(buildText);
-
-        run.BuildPassed = buildOutcome.Result?.Success ?? false;
+        run.BuildPassed = approvedBuildResult.Success;
         run.CompilerErrorCount = buildParsed.ErrorCount;
         run.CompilerWarningCount = buildParsed.WarningCount;
         run.BuildOutputSummary = Truncate(run.BuildPassed == true
             ? $"Build passed with {buildParsed.WarningCount} warning(s)."
-            : $"Build failed with {buildParsed.ErrorCount} error(s): {buildOutcome.Result?.Error}");
+            : $"Build failed with {buildParsed.ErrorCount} error(s): {approvedBuildResult.Error}");
 
-        // ---- Tests (only if the build passed — running tests against broken code is pointless) ----
         if (run.BuildPassed == true && runTests)
         {
-            var testOutcome = await _toolExecutionService.InvokeAsync(
-                "TestTool", repositoryId, new Dictionary<string, string>(), approved: true, ct);
-            var testText = (testOutcome.Result?.Output ?? "") + "\n" + (testOutcome.Result?.Error ?? "");
+            var testText = (approvedTestResult!.Output ?? "") + "\n" + (approvedTestResult.Error ?? "");
             var testParsed = TestOutputParser.Parse(testText);
-
             run.TestsRan = true;
             if (testParsed.Recognized)
             {
-                run.TestsPassed = testParsed.Failed == 0;
+                run.TestsPassed = TestOutputParser.IndicatesVerifiedPass(testParsed, approvedTestResult!.Success);
                 run.TestsTotal = testParsed.Total;
                 run.TestsFailed = testParsed.Failed;
                 run.TestsSkipped = testParsed.Skipped;
-                run.TestOutputSummary = $"{testParsed.Passed}/{testParsed.Total} passed, {testParsed.Failed} failed, {testParsed.Skipped} skipped.";
+                run.TestOutputSummary = $"{testParsed.Passed}/{testParsed.Total} passed, {testParsed.Failed} failed, {testParsed.Skipped} skipped; process exit code {approvedTestResult.ExitCode?.ToString() ?? (approvedTestResult.Success ? "0" : "non-zero")}.";
             }
             else
             {
-                // Section 65: never claim tests passed when the result couldn't actually be parsed.
-                run.TestsPassed = testOutcome.Result?.Success ?? false;
-                run.TestOutputSummary = "Could not parse a standard test summary line; falling back to the test runner's raw exit code: " +
-                    (run.TestsPassed == true ? "success." : "non-zero/failure.");
+                // A zero process exit code without a parseable test summary does not prove
+                // that any tests ran; never turn missing evidence into a pass.
+                run.TestsPassed = false;
+                run.TestOutputSummary = $"Could not verify a standard test summary; process exit code was {approvedTestResult!.ExitCode?.ToString() ?? (approvedTestResult.Success ? "0" : "non-zero")}. Tests are not considered passed.";
             }
         }
         else
@@ -78,17 +105,27 @@ public sealed class VerificationPipelineService
             run.TestsRan = false;
         }
 
-        // ---- Security scan (real regex scan over real, currently-tracked files) ----
-        var trackedFiles = await _db.FileSnapshots
-            .Where(f => f.RepositoryId == repositoryId && !f.IsDeleted)
-            .Select(f => f.RelativePath)
-            .ToListAsync(ct);
-        var scannableFiles = trackedFiles.Where(p => ScannableExtensions.Contains(Path.GetExtension(p))).ToList();
+        // ---- Security scan over a fresh workspace traversal, including unindexed/changed files ----
+        var repo = await _db.Repositories.FirstOrDefaultAsync(r => r.Id == repositoryId, ct)
+            ?? throw new InvalidOperationException("Repository not found; security verification cannot run.");
+        if (!_workspacePolicy.IsAllowed(repo.LocalPath))
+            throw new InvalidOperationException("Repository is outside the configured workspace roots; security verification cannot run.");
+        var scannableFiles = new List<string>();
+        foreach (var relativePath in _fileScanner.EnumeratePaths(repo.LocalPath))
+        {
+            ct.ThrowIfCancellationRequested();
+            var fileName = Path.GetFileName(relativePath);
+            if (!ScannableExtensions.Contains(Path.GetExtension(relativePath)) &&
+                !ScannableExtensionlessNames.Contains(fileName) &&
+                !fileName.StartsWith(".env.", StringComparison.OrdinalIgnoreCase)) continue;
+            scannableFiles.Add(relativePath);
+            if (scannableFiles.Count > 5_000)
+                throw new InvalidOperationException("Security scan stopped: repository has more than 5,000 scannable files; verification is incomplete.");
+        }
 
-        var repo = await _db.Repositories.FirstOrDefaultAsync(r => r.Id == repositoryId, ct);
-        var findings = repo is not null
-            ? await _securityScanner.ScanAsync(repo.LocalPath, scannableFiles, ct)
-            : Array.Empty<SecurityFinding>();
+        if (scannableFiles.Count == 0)
+            throw new InvalidOperationException("Security scan found no supported source/configuration files; verification is incomplete.");
+        var findings = await _securityScanner.ScanAsync(repo.LocalPath, scannableFiles, ct);
 
         run.SecurityFindingCount = findings.Count;
         run.SecurityFindingsJson = JsonSerializer.Serialize(findings);

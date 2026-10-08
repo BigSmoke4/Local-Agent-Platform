@@ -106,7 +106,7 @@ public class AgentTaskNode
     public string? ToolName { get; set; }
     public string? ArgumentsJson { get; set; }
 
-    public string Status { get; set; } = "Pending"; // Pending, Executing, AwaitingApproval, Completed, Failed, Skipped
+    public string Status { get; set; } = "Pending"; // Pending, Executing, AwaitingApproval, Completed, Failed, Skipped, Cancelled
     public string? Output { get; set; }
     public string? Error { get; set; }
     public int RetryCount { get; set; }
@@ -251,7 +251,7 @@ public class RepositoryIndexingJob
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid RepositoryId { get; set; }
 
-    public string Status { get; set; } = "Queued"; // Queued, Scanning, Completed, Failed
+    public string Status { get; set; } = "Queued"; // Queued, Scanning, Completed, Failed, Cancelled
     public int FilesScanned { get; set; }
     public int FilesChanged { get; set; }
     public int FilesDeleted { get; set; }

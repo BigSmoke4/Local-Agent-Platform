@@ -23,6 +23,39 @@ public sealed class RealProcessToolTests
     }
 
     [Fact]
+    public async Task TerminalTool_rejects_shell_chaining_even_after_approval()
+    {
+        var dir = Directory.CreateTempSubdirectory("lap-terminal-shell-");
+        try
+        {
+            var tool = new TerminalTool(NullLogger<TerminalTool>.Instance);
+            var result = await tool.ExecuteAsync(
+                new Dictionary<string, string> { ["command"] = "echo safe; echo unsafe" },
+                new ToolExecutionContext(dir.FullName, Guid.NewGuid(), ApprovalGranted: true));
+            Assert.False(result.Success);
+            Assert.Contains("not supported", result.Error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { dir.Delete(true); }
+    }
+
+    [Fact]
+    public async Task BuildTool_rejects_targets_outside_the_workspace()
+    {
+        var dir = Directory.CreateTempSubdirectory("lap-build-target-");
+        try
+        {
+            var tool = new BuildTool();
+            var result = await tool.ExecuteAsync(
+                new Dictionary<string, string> { ["target"] = "../outside.sln" },
+                new ToolExecutionContext(dir.FullName, Guid.NewGuid()));
+            Assert.False(result.Success);
+            Assert.Contains("inside the workspace", result.Error, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(ToolRiskLevel.High, tool.RiskLevel);
+        }
+        finally { dir.Delete(true); }
+    }
+
+    [Fact]
     public async Task GitTool_Runs_Real_Git_Process()
     {
         var dir = Directory.CreateTempSubdirectory("lap-git-");
@@ -33,6 +66,18 @@ public sealed class RealProcessToolTests
             var tool = new GitTool();
             var result = await tool.ExecuteAsync(new Dictionary<string,string> { ["subcommand"] = "status --short" }, new ToolExecutionContext(dir.FullName, Guid.NewGuid()));
             Assert.True(result.Success, result.Error);
+
+            var arbitraryOutput = await tool.ExecuteAsync(
+                new Dictionary<string, string> { ["subcommand"] = "diff --output=/tmp/lap-git-outside" },
+                new ToolExecutionContext(dir.FullName, Guid.NewGuid()));
+            Assert.False(arbitraryOutput.Success);
+            Assert.Contains("not permitted", arbitraryOutput.Error, StringComparison.OrdinalIgnoreCase);
+
+            var escapedPath = await tool.ExecuteAsync(
+                new Dictionary<string, string> { ["subcommand"] = "diff -- ../../etc/passwd" },
+                new ToolExecutionContext(dir.FullName, Guid.NewGuid()));
+            Assert.False(escapedPath.Success);
+            Assert.Contains("inside", escapedPath.Error, StringComparison.OrdinalIgnoreCase);
         }
         finally { dir.Delete(true); }
     }

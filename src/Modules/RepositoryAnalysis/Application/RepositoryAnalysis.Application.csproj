@@ -12,5 +12,6 @@
     <ProjectReference Include="..\Domain\RepositoryAnalysis.Domain.csproj" />
     <ProjectReference Include="..\Infrastructure\RepositoryAnalysis.Infrastructure.csproj" />
     <ProjectReference Include="..\..\..\Shared\Data\Shared.Data.csproj" />
+    <ProjectReference Include="..\..\..\Shared\Kernel\Shared.Kernel.csproj" />
   </ItemGroup>
 </Project>

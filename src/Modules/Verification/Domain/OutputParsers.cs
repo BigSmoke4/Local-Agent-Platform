@@ -53,4 +53,14 @@ public static class TestOutputParser
 
         return new TestParseResult(true, total, passed, failed, skipped);
     }
+
+    /// <summary>A test run is only verified as passing when the real process succeeded,
+    /// the runner emitted a consistent summary, and at least one test actually ran.</summary>
+    public static bool IndicatesVerifiedPass(TestParseResult result, bool processSucceeded)
+    {
+        if (!processSucceeded || !result.Recognized || result.Total is not int total || total <= 0 ||
+            result.Passed is not int passed || result.Failed is not int failed || result.Skipped is not int skipped)
+            return false;
+        return failed == 0 && passed >= 0 && skipped >= 0 && (long)passed + skipped == total;
+    }
 }

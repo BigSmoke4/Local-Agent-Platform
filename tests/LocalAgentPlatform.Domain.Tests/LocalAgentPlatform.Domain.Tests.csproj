@@ -20,5 +20,6 @@
     <ProjectReference Include="..\..\src\Modules\Verification\Domain\Verification.Domain.csproj" />
     <ProjectReference Include="..\..\src\Modules\Memory\Domain\Memory.Domain.csproj" />
     <ProjectReference Include="..\..\src\Modules\RepositoryAnalysis\Domain\RepositoryAnalysis.Domain.csproj" />
+    <ProjectReference Include="..\..\src\Shared\Kernel\Shared.Kernel.csproj" />
   </ItemGroup>
 </Project>

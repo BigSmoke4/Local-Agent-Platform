@@ -1,6 +1,7 @@
 using LocalAgentPlatform.Modules.RepositoryAnalysis.Application.Services;
 using LocalAgentPlatform.Modules.RepositoryAnalysis.Infrastructure;
 using LocalAgentPlatform.Shared.Data.Entities;
+using LocalAgentPlatform.Shared.Kernel.Files;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
@@ -26,7 +27,8 @@ public class RepositoryIndexingServiceTests : IDisposable
     }
 
     private RepositoryIndexingService CreateService(LocalAgentPlatform.Shared.Data.PlatformDbContext db) =>
-        new(db, new RepositoryFileScanner(), new[] { new RoslynCSharpSymbolExtractor(NullLogger<RoslynCSharpSymbolExtractor>.Instance) }, NullLogger<RepositoryIndexingService>.Instance);
+        new(db, new RepositoryFileScanner(), new[] { new RoslynCSharpSymbolExtractor(NullLogger<RoslynCSharpSymbolExtractor>.Instance) },
+            NullLogger<RepositoryIndexingService>.Instance, new WorkspaceRootPolicy(new[] { _tempRepoPath }));
 
     private async Task<Guid> RegisterRepositoryAsync(LocalAgentPlatform.Shared.Data.PlatformDbContext db)
     {
@@ -80,6 +82,43 @@ public class RepositoryIndexingServiceTests : IDisposable
 
         var secondRun = await service.RunIndexingAsync(repositoryId);
         Assert.Equal(0, secondRun.FilesChanged); // real incremental behavior — same hash, no reprocessing
+    }
+
+    [Fact]
+    public async Task Reappearing_file_reuses_and_reactivates_its_soft_deleted_snapshot()
+    {
+        var filePath = Path.Combine(_tempRepoPath, "Reappearing.cs");
+        const string source = "namespace Demo; public class Reappearing { }";
+        await File.WriteAllTextAsync(filePath, source);
+
+        await using var db = _fixture.CreateContext();
+        var repositoryId = await RegisterRepositoryAsync(db);
+        var service = CreateService(db);
+        await service.RunIndexingAsync(repositoryId);
+        var originalSnapshotId = await db.FileSnapshots
+            .Where(f => f.RepositoryId == repositoryId && f.RelativePath == "Reappearing.cs")
+            .Select(f => f.Id).SingleAsync();
+
+        File.Delete(filePath);
+        var deletedRun = await service.RunIndexingAsync(repositoryId);
+        Assert.Equal(1, deletedRun.FilesDeleted);
+        var repeatedMissingRun = await service.RunIndexingAsync(repositoryId);
+        Assert.Equal(0, repeatedMissingRun.FilesDeleted);
+
+        await File.WriteAllTextAsync(filePath, source);
+        var restoredRun = await service.RunIndexingAsync(repositoryId);
+
+        Assert.Equal("Completed", restoredRun.Status);
+        Assert.Equal(1, restoredRun.FilesChanged);
+        Assert.Equal(0, restoredRun.FilesDeleted);
+        var snapshots = await db.FileSnapshots
+            .Where(f => f.RepositoryId == repositoryId && f.RelativePath == "Reappearing.cs")
+            .ToListAsync();
+        var restored = Assert.Single(snapshots);
+        Assert.Equal(originalSnapshotId, restored.Id);
+        Assert.False(restored.IsDeleted);
+        Assert.Contains(await db.CodeSymbols.Where(s => s.RepositoryId == repositoryId).ToListAsync(),
+            symbol => symbol.Name == "Reappearing");
     }
 
     [Fact]

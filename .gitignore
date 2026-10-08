@@ -2,3 +2,10 @@ bin/
 obj/
 *.user
 .vs/
+/workspace/*
+!/workspace/.gitkeep
+
+# Local extension development and package output
+node_modules/
+.vscode-test/
+*.vsix

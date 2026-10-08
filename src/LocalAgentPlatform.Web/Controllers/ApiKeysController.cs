@@ -43,7 +43,7 @@ public class ApiKeysController : Controller
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Revoke(Guid id, CancellationToken ct)
     {
-        await _apiKeyService.RevokeAsync(id, ct);
+        await _apiKeyService.RevokeAsync(id, CurrentUserId, ct);
         return RedirectToAction(nameof(Index));
     }
 }

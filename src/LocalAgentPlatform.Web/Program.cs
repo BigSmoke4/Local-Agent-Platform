@@ -1,4 +1,5 @@
 using OpenTelemetry.Trace;
+using System.Threading.RateLimiting;
 using LocalAgentPlatform.Modules.Models.Application.Services;
 using LocalAgentPlatform.Modules.Models.Infrastructure.Ollama;
 using LocalAgentPlatform.Modules.Models.Infrastructure.Telemetry;
@@ -13,6 +14,7 @@ using LocalAgentPlatform.Modules.Verification.Application.Services;
 using LocalAgentPlatform.Modules.Verification.Infrastructure.Security;
 using LocalAgentPlatform.Shared.Data;
 using LocalAgentPlatform.Shared.Kernel.BackgroundWork;
+using LocalAgentPlatform.Shared.Kernel.Files;
 using LocalAgentPlatform.Shared.Kernel.Models;
 using LocalAgentPlatform.Shared.Kernel.Telemetry;
 using LocalAgentPlatform.Shared.Kernel.Tools;
@@ -22,6 +24,7 @@ using LocalAgentPlatform.Web.Infrastructure;
 using LocalAgentPlatform.Web.Ide;
 using LocalAgentPlatform.Web.Security;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
@@ -36,6 +39,8 @@ builder.Host.UseSerilog((ctx, services, cfg) => cfg
 
 // ---- Configuration ----
 builder.Services.Configure<OllamaOptions>(builder.Configuration.GetSection(OllamaOptions.SectionName));
+var allowedWorkspaceRoots = builder.Configuration.GetSection("Repositories:AllowedRoots").Get<string[]>() ?? Array.Empty<string>();
+builder.Services.AddSingleton<IWorkspaceRootPolicy>(new WorkspaceRootPolicy(allowedWorkspaceRoots));
 
 // ---- Data layer (PostgreSQL via EF Core) ----
 var connectionString = builder.Configuration.GetConnectionString("PlatformDb")
@@ -67,6 +72,7 @@ builder.Services.AddScoped<IRepositoryContextEngine, RepositoryContextEngine>();
 builder.Services.AddSingleton<ChannelBackgroundTaskQueue>();
 builder.Services.AddSingleton<IBackgroundTaskQueue>(sp => sp.GetRequiredService<ChannelBackgroundTaskQueue>());
 builder.Services.AddHostedService<QueuedHostedService>();
+builder.Services.AddHostedService<PendingAgentSessionRecoveryService>();
 
 // ---- Tool Execution Engine (Phase 4, Sections 10/11) ----
 // Register every concrete tool as ITool; ToolExecutionService discovers them via
@@ -115,7 +121,10 @@ builder.Services.AddControllersWithViews(options =>
 // ---- Authentication: cookie for the MVC UI, API key for /api/* ----
 builder.Services.AddScoped<ApiKeyService>();
 builder.Services.AddSingleton<TotpService>();
-builder.Services.AddDataProtection();
+var dataProtection = builder.Services.AddDataProtection().SetApplicationName("LocalAgentPlatform");
+var dataProtectionKeyPath = builder.Configuration["DataProtection:KeyRingPath"];
+if (!string.IsNullOrWhiteSpace(dataProtectionKeyPath))
+    dataProtection.PersistKeysToFileSystem(new DirectoryInfo(dataProtectionKeyPath));
 builder.Services
     .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
@@ -164,15 +173,30 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 
-// ---- API rate limiting (Phase 11, Section 38) ----
+// ---- API and credential-endpoint rate limiting ----
+// Partition by remote IP so one client cannot consume a process-wide bucket and starve
+// unrelated local users. Authentication endpoints have a deliberately tighter limit.
 builder.Services.AddRateLimiter(options =>
 {
-    options.AddFixedWindowLimiter("api", opt =>
-    {
-        opt.PermitLimit = 60;
-        opt.Window = TimeSpan.FromMinutes(1);
-        opt.QueueLimit = 0;
-    });
+    static string ClientPartition(HttpContext context) =>
+        context.Connection.RemoteIpAddress?.MapToIPv6().ToString() ?? "unknown-client";
+
+    options.AddPolicy("api", context => RateLimitPartition.GetFixedWindowLimiter(
+        ClientPartition(context), _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 60,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("auth", context => RateLimitPartition.GetFixedWindowLimiter(
+        ClientPartition(context), _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 5,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 });
 

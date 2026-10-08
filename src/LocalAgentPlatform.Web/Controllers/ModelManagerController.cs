@@ -1,4 +1,5 @@
 using LocalAgentPlatform.Modules.Models.Application.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace LocalAgentPlatform.Web.Controllers;
@@ -19,6 +20,7 @@ public class ModelManagerController : Controller
     }
 
     [HttpPost]
+    [Authorize(Policy = "AdminOnly")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Register(string runtimeModelId, CancellationToken ct)
     {
@@ -32,6 +34,7 @@ public class ModelManagerController : Controller
     }
 
     [HttpPost]
+    [Authorize(Policy = "AdminOnly")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> SetDefault(Guid id, CancellationToken ct)
     {
@@ -40,6 +43,7 @@ public class ModelManagerController : Controller
     }
 
     [HttpPost]
+    [Authorize(Policy = "AdminOnly")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
     {
@@ -48,6 +52,7 @@ public class ModelManagerController : Controller
     }
 
     [HttpPost]
+    [Authorize(Policy = "AdminOnly")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Load(string modelId, CancellationToken ct)
     {
@@ -59,6 +64,7 @@ public class ModelManagerController : Controller
     }
 
     [HttpPost]
+    [Authorize(Policy = "AdminOnly")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Unload(string modelId, CancellationToken ct)
     {

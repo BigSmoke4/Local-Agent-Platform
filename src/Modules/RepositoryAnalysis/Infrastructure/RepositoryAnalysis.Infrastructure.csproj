@@ -11,5 +11,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Domain\RepositoryAnalysis.Domain.csproj" />
+    <ProjectReference Include="..\..\..\Shared\Kernel\Shared.Kernel.csproj" />
   </ItemGroup>
 </Project>

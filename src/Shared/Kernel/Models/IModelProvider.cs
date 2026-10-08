@@ -44,9 +44,9 @@ public sealed record ModelDescriptor(
     long? FileSizeBytes,
     long? EstimatedRamBytes,
     long? EstimatedVramBytes,
-    bool CodingCapability,
-    bool ReasoningCapability,
-    bool ToolCallingCapability,
+    bool? CodingCapability,
+    bool? ReasoningCapability,
+    bool? ToolCallingCapability,
     bool StreamingCapability
 );
 
@@ -68,7 +68,9 @@ public sealed record ModelGenerationResult(
     TimeSpan Duration,
     TimeSpan? TimeToFirstToken,
     string ModelId,
-    bool FromCache
+    bool FromCache,
+    TimeSpan? GenerationDuration = null,
+    TimeSpan? PromptProcessingDuration = null
 );
 
 public sealed record ModelStreamChunk(string DeltaText, bool IsFinal, int? TokensSoFar);

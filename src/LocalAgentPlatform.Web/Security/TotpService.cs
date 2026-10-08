@@ -15,8 +15,12 @@ public sealed class TotpService
 
     public bool Verify(string base32Secret, string code, DateTimeOffset? now = null)
     {
-        if (string.IsNullOrWhiteSpace(code) || code.Length != 6 || !code.All(char.IsDigit)) return false;
-        var secret = Base32Decode(base32Secret);
+        if (string.IsNullOrWhiteSpace(base32Secret) || base32Secret.Length > 256 ||
+            string.IsNullOrWhiteSpace(code) || code.Length != 6 || !code.All(c => c is >= '0' and <= '9')) return false;
+        byte[] secret;
+        try { secret = Base32Decode(base32Secret); }
+        catch (FormatException) { return false; }
+        if (secret.Length < 16) return false;
         var counter = (now ?? DateTimeOffset.UtcNow).ToUnixTimeSeconds() / 30;
         for (var offset = -1; offset <= 1; offset++)
             if (FixedTimeEquals(Compute(secret, counter + offset), code)) return true;

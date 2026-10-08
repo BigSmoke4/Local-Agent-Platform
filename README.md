@@ -12,11 +12,14 @@ A local-first autonomous coding platform built with **ASP.NET Core 8, PostgreSQL
 - Model-driven JSON planning through `IModelProvider`.
 - **General DAG task plans** with stable step IDs and `dependsOn` edges.
 - Cycle/unknown-dependency validation before execution.
-- Deterministic fan-out/fan-in execution while avoiding unsafe parallel file mutations.
+- Deterministic topological execution of dependency graphs; execution is sequential (not parallel) until resource/file locking exists.
 - Iteration, retry, duration, and repair budgets.
-- Human approval gates for risky tool calls.
+- Human approval gates for risky tool calls; approvals are scoped to a single invocation and retries require a new approval.
+- Build and test verification use real `dotnet` processes and require explicit approval because repository targets/tests execute code.
+- A bounded, heuristic security-pattern scan covers a fresh workspace traversal; it fails closed on inaccessible, linked, or over-budget coverage. It is not a full SAST engine.
 - Verification, reviewer, and bounded repair loop.
 - Cancellation and SignalR state broadcasts.
+- Startup recovery re-enqueues persisted sessions that remain unclaimed in `Created`; already-claimed sessions are not replayed because external tool side effects are not generally exactly-once safe.
 
 ### Repository intelligence and Context Engine
 
@@ -55,11 +58,12 @@ Tool execution includes:
 
 - Per-tool risk levels and timeouts.
 - Command allow/deny/approval policy.
-- Persistent per-user **Always Allow / Always Deny** rules.
-- The same persisted rules now apply to **agent-initiated** terminal calls because sessions carry their owner identity.
+- Persistent per-user **Always Deny** rules are available for terminal executables and apply to agent-initiated calls. **Always Allow is intentionally unavailable for the current High-risk TerminalTool**; every terminal call requires its own approval, and legacy allow records cannot clear that independent gate.
 - Audit rows for allowed, denied, pending, successful, and failed executions.
+- A fail-closed configured workspace-root allowlist (`Repositories:AllowedRoots`; Compose allows `/workspace`).
 - Path traversal checks plus **symlink/reparse-point-aware workspace escape prevention**.
-- Secret redaction in terminal output.
+- Secret redaction in process output, tool audit records, and security-finding excerpts.
+- The web process in Docker Compose drops to a configurable non-root UID before starting; the trusted entrypoint retains only the capabilities needed to repair key-ring volume ownership and drop privileges. `no-new-privileges` is enabled; tool processes still share the web UID/namespace, so this is defense in depth, not a hostile-code sandbox.
 
 ### Authentication, authorization, and user isolation
 
@@ -76,9 +80,11 @@ Tool execution includes:
 
 ### IDE integration
 
-- Generic authenticated REST/OpenAPI integration remains available for any compatible editor/tool.
-- A concrete **VS Code CLI adapter** is included and exposes status/open-file endpoints under `/api/ide` when the `code` CLI is installed on the host.
-- `IIdeIntegrationProvider` remains the abstraction for additional adapters.
+- An authenticated REST API supports compatible editor and automation clients.
+- A standalone **VS Code extension** is available under [`integrations/vscode`](integrations/vscode): it discovers allowed repositories/models, opens local checkouts/files (including configured container-to-host path mappings), lists changed paths from completed file-write/edit tasks, starts sessions, polls session/task status every 15 seconds while its view is visible, and supports one-time approval and cancellation.
+- The extension keeps the API key in VS Code SecretStorage and allows plain HTTP only for loopback hosts; remote API URLs must use HTTPS.
+- A separate **VS Code CLI adapter** exposes `/api/ide/status` and `/api/ide/open` when the `code` executable is available to the web process.
+- `IIdeIntegrationProvider` remains the abstraction for additional server-side adapters. See the extension README for setup and verification limits.
 
 ### Telemetry
 
@@ -98,14 +104,14 @@ Tool execution includes:
 - Serilog structured logging.
 - OpenTelemetry ASP.NET Core/HTTP tracing.
 - Dockerfile + Docker Compose.
-- GitHub Actions CI for restore/build/unit/integration tests and Docker build.
+- GitHub Actions CI for VS Code client tests, .NET restore/build/unit/PostgreSQL integration tests, and Docker build.
 - **GitHub Actions CD** publishes images to GHCR and can deploy over SSH to a protected `production` environment when deployment variables/secrets are configured.
 
 ## Repository layout
 
 ```text
 src/
-  LocalAgentPlatform.Web/             MVC/API host, auth, SignalR, UI, VS Code adapter
+  LocalAgentPlatform.Web/             MVC/API host, auth, SignalR, UI, VS Code CLI adapter
   Modules/
     Agent/                             planner + orchestrator
     Memory/                            semantic/lexical memory
@@ -118,6 +124,9 @@ src/
   Shared/
     Data/                              EF Core entities and PlatformDbContext
     Kernel/                            provider/tool/telemetry abstractions
+
+integrations/
+  vscode/                             VS Code extension + Node client/filesystem tests
 
 tests/
   LocalAgentPlatform.Domain.Tests/
@@ -138,11 +147,12 @@ For direct development:
 - PostgreSQL 16+
 - Ollama
 - Git
-- Optional: VS Code `code` CLI
+- Optional: Node.js for the VS Code API-client tests (`cd integrations/vscode && npm test`)
+- Optional: VS Code `code` CLI for the server-side open-file adapter
 - Optional GPU telemetry: `nvidia-smi` or `rocm-smi`
 - Optional load tests: k6
 
-Docker Compose can supply PostgreSQL and Ollama.
+Docker Compose can supply PostgreSQL and Ollama. Published service ports bind to loopback by default; they are not exposed to the LAN. A trusted entrypoint uses only the capabilities needed to repair key-ring volume ownership and drop privileges; the web process then runs as a configurable non-root UID (default `1000`), with all other capabilities dropped and `no-new-privileges` enabled. Make sure the host `workspace/` directory and mounted repositories are writable by that UID. On Linux, if your account uses a different UID/GID, export `LOCAL_AGENT_UID=$(id -u)` and `LOCAL_AGENT_GID=$(id -g)` before building the Compose service.
 
 ## Quick start with Docker Compose
 
@@ -205,7 +215,13 @@ After login, open the Account Security page and choose **Set up MFA**. Add the d
 
 ## Register a repository
 
-When running directly, register a path that exists on the host. When running in Docker, mount repositories under the Compose `./workspace:/workspace` volume and register the container path, for example:
+Repository access is restricted to explicitly configured workspace roots. The default configuration is fail-closed (`Repositories:AllowedRoots` is empty), so direct runs must set an allowlisted root before registering repositories. For example:
+
+```bash
+export Repositories__AllowedRoots__0="$HOME/dev"
+```
+
+The Docker Compose configuration allowlists `/workspace`. Mount repositories under the Compose `./workspace:/workspace` volume and register a path beneath it, for example:
 
 ```text
 /workspace/my-repository
@@ -282,24 +298,28 @@ API clients send:
 X-Api-Key: lap_...
 ```
 
-VS Code integration endpoints:
+The standalone extension uses these authenticated API routes:
+
+```text
+GET  /api/repositories
+GET  /api/models
+GET  /api/agent/sessions
+GET  /api/agent/sessions/{id}/tasks
+POST /api/agent/sessions
+POST /api/agent/sessions/{id}/approve
+POST /api/agent/sessions/{id}/cancel
+```
+
+Session creation takes `repositoryId`, `modelId`, and `userRequest`. Repository discovery is owner-scoped and excludes paths outside the configured workspace roots. See [`integrations/vscode/README.md`](integrations/vscode/README.md) for extension setup.
+
+The separate server-side CLI adapter exposes:
 
 ```text
 GET  /api/ide/status
 POST /api/ide/open
 ```
 
-Example request body:
-
-```json
-{
-  "path": "/workspace/my-repo/src/Program.cs",
-  "line": 42,
-  "column": 1
-}
-```
-
-The adapter requires the `code` executable to be available to the web process.
+The open-file request accepts a canonical file path under an allowed repository, plus an optional line and column. This adapter requires the `code` executable to be available to the web process.
 
 ## CI/CD configuration
 
@@ -333,8 +353,8 @@ Production secrets remain outside the repository and should be supplied through 
 - Cross-file relationship generation is bounded to avoid unbounded indexing cost on very large repositories.
 - The semantic memory vector is currently stored as JSON for provider/database portability rather than requiring `pgvector`. For very large memory stores, migrate to `pgvector` or another ANN index.
 - NVIDIA and ROCm telemetry depend on vendor CLIs being installed and visible to the application process.
-- The VS Code adapter is a CLI integration, not a custom VS Code extension.
-- The baseline EF migration should be generated and committed from a machine with the .NET 8 SDK before treating schema evolution as production-ready.
+- The VS Code extension has 23 passing Node API-client/command-flow/manifest/filesystem-safety tests and packages successfully as a VSIX. An Extension Host smoke test is configured in CI; the local run was blocked before VS Code launched by a TLS failure downloading VS Code. Live-platform end-to-end testing remains outstanding.
+- CI can generate and publish a temporary EF baseline migration artifact when none is committed; review and check that baseline into source control before treating schema evolution as production-ready.
 
 ## Documentation
 
@@ -344,4 +364,4 @@ Production secrets remain outside the repository and should be supplied through 
 
 ## License
 
-No license file is currently included. Add one before distributing the repository under an open-source license.
+This project is licensed under the MIT License. See [`LICENSE`](LICENSE).

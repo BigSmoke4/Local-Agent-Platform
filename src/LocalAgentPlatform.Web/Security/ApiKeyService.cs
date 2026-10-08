@@ -38,12 +38,16 @@ public sealed class ApiKeyService
         return key;
     }
 
-    public async Task RevokeAsync(Guid id, CancellationToken ct = default)
+    public async Task<bool> RevokeAsync(Guid id, Guid ownerUserId, CancellationToken ct = default)
     {
-        var key = await _db.ApiKeys.FirstOrDefaultAsync(k => k.Id == id, ct);
-        if (key is null) return;
-        key.RevokedAtUtc = DateTimeOffset.UtcNow;
-        await _db.SaveChangesAsync(ct);
+        var key = await _db.ApiKeys.FirstOrDefaultAsync(k => k.Id == id && k.OwnerUserId == ownerUserId, ct);
+        if (key is null) return false;
+        if (key.RevokedAtUtc is null)
+        {
+            key.RevokedAtUtc = DateTimeOffset.UtcNow;
+            await _db.SaveChangesAsync(ct);
+        }
+        return true;
     }
 
     private static string Hash(string rawKey) =>

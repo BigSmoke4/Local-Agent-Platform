@@ -13,9 +13,32 @@ public sealed class MemoryWriteService
     public MemoryWriteService(PlatformDbContext db, IEmbeddingProvider embeddings) { _db = db; _embeddings = embeddings; }
 
     public async Task<MemoryEntry> AddManualAsync(string scope, string title, string content, string? tags,
-        Guid? repositoryId, Guid? projectId, double baseImportance, CancellationToken ct = default, Guid? ownerUserId = null)
+        Guid? repositoryId, Guid? projectId, double baseImportance, Guid ownerUserId, CancellationToken ct = default)
     {
-        var entry = new MemoryEntry { OwnerUserId = ownerUserId ?? Guid.Empty, Scope = scope, Title = title, Content = content, Tags = tags,
+        var allowedScopes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "LongTerm", "UserPreference", "Working" };
+        if (!allowedScopes.Contains(scope) || string.IsNullOrWhiteSpace(title) || title.Length > 160 ||
+            string.IsNullOrWhiteSpace(content) || content.Length > 4_000 || tags?.Length > 500 ||
+            !double.IsFinite(baseImportance))
+            throw new ArgumentException("Memory scope or content is invalid or exceeds its size limit.");
+
+        if (repositoryId is { } repoId)
+        {
+            var repository = await _db.Repositories
+                .Where(r => r.Id == repoId && r.Project!.OwnerUserId == ownerUserId)
+                .Select(r => new { r.Id, r.ProjectId })
+                .FirstOrDefaultAsync(ct)
+                ?? throw new InvalidOperationException("Repository not found or access denied.");
+            if (projectId is not null && projectId != repository.ProjectId)
+                throw new InvalidOperationException("Repository and project do not match.");
+            projectId = repository.ProjectId;
+        }
+        else if (projectId is { } projectIdValue &&
+                 !await _db.Projects.AnyAsync(p => p.Id == projectIdValue && p.OwnerUserId == ownerUserId, ct))
+        {
+            throw new InvalidOperationException("Project not found or access denied.");
+        }
+
+        var entry = new MemoryEntry { OwnerUserId = ownerUserId, Scope = scope, Title = title.Trim(), Content = content, Tags = tags,
             RepositoryId = repositoryId, ProjectId = projectId, BaseImportance = Math.Clamp(baseImportance, 0.0, 1.0) };
         await AttachEmbeddingBestEffortAsync(entry, ct);
         _db.MemoryEntries.Add(entry);
@@ -53,7 +76,8 @@ public sealed class MemoryWriteService
             entry.EmbeddingJson = JsonSerializer.Serialize(vector);
             entry.EmbeddingModelId = _embeddings.DefaultEmbeddingModelId;
         }
-        catch { /* Memory must remain usable when the optional embedding model is not installed. */ }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { /* Memory remains usable when the optional local embedding model is unavailable. */ }
     }
 
     private static string? Truncate(string? s, int max) => s is { Length: > 0 } && s.Length > max ? s[..max] + "... [truncated]" : s;

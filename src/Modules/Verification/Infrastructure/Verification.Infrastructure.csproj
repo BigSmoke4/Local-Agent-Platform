@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Domain\Verification.Domain.csproj" />
+    <ProjectReference Include="..\..\..\Shared\Kernel\Shared.Kernel.csproj" />
   </ItemGroup>
 </Project>

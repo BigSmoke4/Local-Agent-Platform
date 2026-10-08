@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -19,7 +19,7 @@ services:
   ollama:
     image: ollama/ollama:latest
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollamadata:/root/.ollama
 
@@ -27,8 +27,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        APP_UID: ${LOCAL_AGENT_UID:-1000}
+        APP_GID: ${LOCAL_AGENT_GID:-1000}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -37,11 +48,15 @@ services:
     environment:
       ConnectionStrings__PlatformDb: "Host=postgres;Port=5432;Database=local_agent_platform;Username=postgres;Password=postgres"
       Ollama__BaseUrl: "http://ollama:11434"
+      Repositories__AllowedRoots__0: "/workspace"
+      DataProtection__KeyRingPath: "/var/lib/local-agent-platform/keyring"
     volumes:
       # Mount repositories you want the platform to work on here, then register
       # them (from inside the container) as e.g. /workspace/my-repo.
       - ./workspace:/workspace
+      - dataprotection:/var/lib/local-agent-platform/keyring
 
 volumes:
   pgdata:
   ollamadata:
+  dataprotection:

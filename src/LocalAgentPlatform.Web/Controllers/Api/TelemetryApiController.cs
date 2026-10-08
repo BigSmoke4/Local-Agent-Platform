@@ -1,4 +1,5 @@
 using LocalAgentPlatform.Shared.Data;
+using LocalAgentPlatform.Shared.Kernel.Files;
 using LocalAgentPlatform.Shared.Kernel.Telemetry;
 using LocalAgentPlatform.Web.Models.Api;
 using LocalAgentPlatform.Web.Security;
@@ -17,11 +18,16 @@ public sealed class TelemetryApiController : ControllerBase
 {
     private readonly IHardwareTelemetryProvider _hardware;
     private readonly PlatformDbContext _db;
+    private readonly IWorkspaceRootPolicy _workspacePolicy;
 
-    public TelemetryApiController(IHardwareTelemetryProvider hardware, PlatformDbContext db)
+    public TelemetryApiController(
+        IHardwareTelemetryProvider hardware,
+        PlatformDbContext db,
+        IWorkspaceRootPolicy workspacePolicy)
     {
         _hardware = hardware;
         _db = db;
+        _workspacePolicy = workspacePolicy;
     }
 
     [HttpGet("hardware")]
@@ -36,8 +42,26 @@ public sealed class TelemetryApiController : ControllerBase
     [HttpGet("tokens")]
     public async Task<ActionResult<TokenUsageSummaryDto>> Tokens(CancellationToken ct)
     {
-        var records = await _db.TokenUsageRecords.ToListAsync(ct);
-        return Ok(new TokenUsageSummaryDto(
-            records.Sum(r => r.InputTokens), records.Sum(r => r.OutputTokens), records.Count));
+        var userId = User.RequireUserId();
+        var repositories = await _db.Repositories
+            .Where(r => r.Project!.OwnerUserId == userId)
+            .Select(r => new { r.Id, r.LocalPath })
+            .ToListAsync(ct);
+        var visibleRepositoryIds = repositories
+            .Where(r => _workspacePolicy.IsAllowed(r.LocalPath))
+            .Select(r => r.Id)
+            .ToArray();
+        var totals = await _db.TokenUsageRecords
+            .Where(r => _db.AgentSessions.Any(s => s.Id == r.AgentSessionId && s.OwnerUserId == userId &&
+                                                   visibleRepositoryIds.Contains(s.RepositoryId)))
+            .GroupBy(_ => 1)
+            .Select(g => new
+            {
+                Input = g.Sum(r => r.InputTokens),
+                Output = g.Sum(r => r.OutputTokens),
+                Count = g.Count()
+            })
+            .FirstOrDefaultAsync(ct);
+        return Ok(new TokenUsageSummaryDto(totals?.Input ?? 0, totals?.Output ?? 0, totals?.Count ?? 0));
     }
 }

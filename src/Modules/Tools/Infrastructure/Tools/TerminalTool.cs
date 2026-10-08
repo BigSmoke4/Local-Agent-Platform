@@ -1,26 +1,29 @@
 using System.Diagnostics;
 using System.Text;
 using LocalAgentPlatform.Modules.Tools.Domain;
+using LocalAgentPlatform.Shared.Kernel.Files;
+using LocalAgentPlatform.Shared.Kernel.Security;
 using LocalAgentPlatform.Shared.Kernel.Tools;
 using Microsoft.Extensions.Logging;
 
 namespace LocalAgentPlatform.Modules.Tools.Infrastructure.Tools;
 
 /// <summary>
-/// Executes a shell command via a real child process, restricted to the repository's
-/// workspace root as the working directory. Every invocation is checked against
-/// <see cref="CommandPolicyEngine"/> by the Application-layer ToolExecutionService
-/// *before* this tool is ever called — this class assumes it has already been cleared
-/// (Allow) or explicitly approved, and re-validates defensively regardless.
+/// Runs one parsed executable directly with an argument vector. No shell is spawned,
+/// so separators, pipelines, redirects, substitutions, and shell expansion cannot turn
+/// an approved command into additional commands. ToolExecutionService performs the
+/// user/risk approval gate; this tool repeats the static deny/approval checks as defense
+/// in depth for direct callers.
 /// </summary>
 public sealed class TerminalTool : ITool
 {
+    private const int MaxCapturedCharacters = 100_000;
     private readonly ILogger<TerminalTool> _logger;
 
     public TerminalTool(ILogger<TerminalTool> logger) => _logger = logger;
 
     public string Name => "TerminalTool";
-    public string Description => "Runs a shell command inside the repository workspace, subject to the command policy engine.";
+    public string Description => "Runs one executable inside the repository workspace without a shell; chaining, pipes, redirection, and shell expansion are unsupported.";
     public ToolRiskLevel RiskLevel => ToolRiskLevel.High;
     public TimeSpan Timeout => TimeSpan.FromMinutes(2);
 
@@ -30,81 +33,121 @@ public sealed class TerminalTool : ITool
         if (!parameters.TryGetValue("command", out var command) || string.IsNullOrWhiteSpace(command))
             return ToolExecutionResult.Fail("Missing required parameter 'command'.");
 
-        // Defensive re-check even though the Application layer should have already gated this.
-        var policy = CommandPolicyEngine.Evaluate(command);
-        if (policy.Decision != CommandDecision.Allow)
-            return ToolExecutionResult.Fail($"TerminalTool refused to run an unapproved command: {policy.Reason}");
+        if (!CommandPolicyEngine.TryParseSimpleCommand(command, out var parsed, out var parseError) || parsed is null)
+            return ToolExecutionResult.Fail($"TerminalTool refused the command: {parseError}");
 
-        var isWindows = OperatingSystem.IsWindows();
+        var policy = CommandPolicyEngine.Evaluate(command);
+        if (policy.Decision == CommandDecision.Deny)
+            return ToolExecutionResult.Fail($"TerminalTool refused to run the command: {policy.Reason}");
+        if (policy.Decision == CommandDecision.RequireApproval && !context.ApprovalGranted)
+            return ToolExecutionResult.Fail($"TerminalTool requires explicit approval: {policy.Reason}");
+
+        if (!WorkspacePathGuard.IsSafeWorkspaceRoot(context.RepositoryRootPath))
+            return ToolExecutionResult.Fail("Repository workspace must be an existing real directory without linked path components.");
+
         var psi = new ProcessStartInfo
         {
-            FileName = isWindows ? "cmd.exe" : "/bin/bash",
-            ArgumentList = { isWindows ? "/c" : "-c", command },
+            FileName = parsed.Executable,
             WorkingDirectory = context.RepositoryRootPath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
         };
+        foreach (var argument in parsed.Arguments) psi.ArgumentList.Add(argument);
+        RestrictEnvironment(psi);
 
-        using var process = new Process { StartInfo = psi };
-        var stdout = new StringBuilder();
-        var stderr = new StringBuilder();
-
-        process.OutputDataReceived += (_, e) => { if (e.Data is not null) stdout.AppendLine(e.Data); };
-        process.ErrorDataReceived += (_, e) => { if (e.Data is not null) stderr.AppendLine(e.Data); };
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(Timeout);
+        using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        Task<string>? stdoutTask = null;
+        Task<string>? stderrTask = null;
 
         try
         {
             process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
+            stdoutTask = ReadBoundedAsync(process.StandardOutput, MaxCapturedCharacters);
+            stderrTask = ReadBoundedAsync(process.StandardError, MaxCapturedCharacters);
 
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(Timeout);
             await process.WaitForExitAsync(timeoutCts.Token);
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
 
-            var success = process.ExitCode == 0;
-            var redactedOut = RedactSecrets(stdout.ToString());
-            var redactedErr = RedactSecrets(stderr.ToString());
-
-            return success
+            var redactedOut = SecretRedactor.Redact(stdout);
+            var redactedErr = SecretRedactor.Redact(stderr);
+            return process.ExitCode == 0
                 ? ToolExecutionResult.Ok(redactedOut)
                 : ToolExecutionResult.Fail(redactedErr, redactedOut) with { ExitCode = process.ExitCode };
         }
-        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             TryKill(process);
-            return ToolExecutionResult.Fail($"Command timed out after {Timeout.TotalSeconds:0}s and was terminated.");
+            await DrainOutputAsync(stdoutTask, stderrTask);
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(process);
+            var (stdout, stderr) = await DrainOutputAsync(stdoutTask, stderrTask);
+            return ToolExecutionResult.Fail(
+                $"Command timed out after {Timeout.TotalSeconds:0}s and was terminated. {SecretRedactor.Redact(stderr)}",
+                SecretRedactor.Redact(stdout));
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "TerminalTool failed to execute command.");
-            return ToolExecutionResult.Fail($"Failed to execute command: {ex.Message}");
+            TryKill(process);
+            await DrainOutputAsync(stdoutTask, stderrTask);
+            _logger.LogError(ex, "TerminalTool failed to execute {Executable}.", parsed.Executable);
+            return ToolExecutionResult.Fail($"Failed to execute command: {SecretRedactor.Redact(ex.Message)}");
         }
+    }
+
+    private static void RestrictEnvironment(ProcessStartInfo psi)
+    {
+        // Child tools do not inherit application secrets (e.g. database credentials or
+        // API keys). Keep only variables needed to resolve runtimes and temp paths.
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
+            "DOTNET_ROOT", "DOTNET_ROOT(x86)", "NUGET_PACKAGES", "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME", "XDG_DATA_HOME"
+        };
+        foreach (var name in psi.Environment.Keys.ToArray())
+            if (!allowed.Contains(name)) psi.Environment.Remove(name);
+    }
+
+    private static async Task<string> ReadBoundedAsync(StreamReader reader, int maxCharacters)
+    {
+        var builder = new StringBuilder(Math.Min(maxCharacters, 4096));
+        var buffer = new char[4096];
+        var truncated = false;
+        int count;
+        while ((count = await reader.ReadAsync(buffer.AsMemory(), CancellationToken.None)) > 0)
+        {
+            var remaining = maxCharacters - builder.Length;
+            if (remaining > 0) builder.Append(buffer, 0, Math.Min(remaining, count));
+            if (count > remaining) truncated = true;
+        }
+        if (truncated) builder.Append("\n[output truncated at the capture limit]");
+        return builder.ToString();
+    }
+
+    private static async Task<(string Stdout, string Stderr)> DrainOutputAsync(Task<string>? stdout, Task<string>? stderr)
+    {
+        try
+        {
+            if (stdout is null || stderr is null) return (string.Empty, string.Empty);
+            await Task.WhenAll(stdout, stderr);
+            return (await stdout, await stderr);
+        }
+        catch { return (string.Empty, string.Empty); }
     }
 
     private static void TryKill(Process process)
     {
         try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
-        catch { /* best-effort */ }
+        catch (InvalidOperationException) { }
+        catch (System.ComponentModel.Win32Exception) { }
     }
 
-    /// <summary>Basic secret redaction on tool output (Section 38: "redact API keys,
-    /// passwords, tokens, connection strings, private keys"). Pattern-based, not exhaustive.</summary>
-    private static string RedactSecrets(string text)
-    {
-        var patterns = new (string Pattern, string Replacement)[]
-        {
-            (@"(?i)(api[_-]?key\s*[:=]\s*)[\w\-]{8,}", "$1[REDACTED]"),
-            (@"(?i)(password\s*[:=]\s*)\S+", "$1[REDACTED]"),
-            (@"(?i)(secret\s*[:=]\s*)\S+", "$1[REDACTED]"),
-            (@"(?i)(Authorization:\s*Bearer\s+)[\w\-\.]+", "$1[REDACTED]"),
-            (@"postgres(ql)?://[^:]+:[^@]+@", "postgresql://[REDACTED]@")
-        };
-        foreach (var (pattern, replacement) in patterns)
-            text = System.Text.RegularExpressions.Regex.Replace(text, pattern, replacement);
-        return text;
-    }
 }

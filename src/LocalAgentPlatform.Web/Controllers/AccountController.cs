@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 
 namespace LocalAgentPlatform.Web.Controllers;
@@ -36,18 +37,25 @@ public class AccountController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> Register(string userName, string password)
+    [EnableRateLimiting("auth")]
+    public async Task<IActionResult> Register(string userName, string password, CancellationToken ct)
     {
-        var anyUsers = await _db.Users.AnyAsync();
+        // Serialize the bootstrap decision so two simultaneous first registrations
+        // cannot both become administrators. This application targets PostgreSQL.
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(764831245);", ct);
+        var anyUsers = await _db.Users.AnyAsync(ct);
         if (anyUsers && (!(User.Identity?.IsAuthenticated ?? false) || !User.IsAdmin())) return Forbid();
 
-        if (string.IsNullOrWhiteSpace(userName) || string.IsNullOrWhiteSpace(password) || password.Length < 12)
+        var normalizedUserName = userName?.Trim().ToLowerInvariant() ?? string.Empty;
+        if (!System.Text.RegularExpressions.Regex.IsMatch(normalizedUserName, @"^[a-z0-9_.-]{3,64}$") ||
+            string.IsNullOrEmpty(password) || password.Length < 12 || password.Length > 256)
         {
-            ModelState.AddModelError("", "Username is required and password must be at least 12 characters.");
+            ModelState.AddModelError("", "Username must be 3–64 letters, digits, dots, underscores, or hyphens; password must be 12–256 characters.");
             return View();
         }
 
-        if (await _db.Users.AnyAsync(u => u.UserName == userName))
+        if (await _db.Users.AnyAsync(u => u.UserName.ToLower() == normalizedUserName, ct))
         {
             ModelState.AddModelError("", "That username is already taken.");
             return View();
@@ -56,13 +64,14 @@ public class AccountController : Controller
         var recoveryCode = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
         var user = new AppUser
         {
-            UserName = userName.Trim(),
+            UserName = normalizedUserName,
             PasswordHash = PasswordHasher.Hash(password),
             Role = anyUsers ? "User" : "Admin",
             RecoveryCodeHash = PasswordHasher.Hash(recoveryCode)
         };
         _db.Users.Add(user);
-        await _db.SaveChangesAsync();
+        await _db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
 
         TempData["RecoveryCode"] = recoveryCode;
         return RedirectToAction(nameof(RecoveryCode));
@@ -71,7 +80,7 @@ public class AccountController : Controller
     [HttpGet]
     public IActionResult RecoveryCode()
     {
-        if (TempData.Peek("RecoveryCode") is not string code) return RedirectToAction(nameof(Login));
+        if (TempData["RecoveryCode"] is not string code) return RedirectToAction(nameof(Login));
         ViewBag.RecoveryCode = code;
         return View();
     }
@@ -81,10 +90,12 @@ public class AccountController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("auth")]
     public async Task<IActionResult> Login(string userName, string password, string? mfaCode, string? returnUrl)
     {
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.UserName == userName);
-        if (user is null || !PasswordHasher.Verify(password, user.PasswordHash))
+        var normalizedUserName = userName is { Length: <= 256 } ? userName.Trim().ToLowerInvariant() : string.Empty;
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.UserName.ToLower() == normalizedUserName);
+        if (user is null || password is null || password.Length > 256 || !PasswordHasher.Verify(password, user.PasswordHash))
         {
             ModelState.AddModelError("", "Invalid username or password.");
             return View();
@@ -97,7 +108,13 @@ public class AccountController : Controller
                 ModelState.AddModelError("", "MFA is enabled but the account secret is unavailable. Use account recovery.");
                 return View();
             }
-            var secret = _mfaProtector.Unprotect(user.MfaSecretProtected);
+            string secret;
+            try { secret = _mfaProtector.Unprotect(user.MfaSecretProtected); }
+            catch (CryptographicException)
+            {
+                ModelState.AddModelError("", "MFA account data could not be decrypted. Use account recovery.");
+                return View();
+            }
             if (!_totp.Verify(secret, mfaCode ?? string.Empty))
             {
                 ModelState.AddModelError("", "A valid 6-digit authenticator code is required.");
@@ -129,10 +146,16 @@ public class AccountController : Controller
     [HttpPost]
     [ValidateAntiForgeryToken]
     [Authorize]
+    [EnableRateLimiting("auth")]
     public async Task<IActionResult> BeginMfa(CancellationToken ct)
     {
         var user = await _db.Users.FindAsync(new object[] { User.RequireUserId() }, ct);
         if (user is null) return NotFound();
+        if (user.MfaEnabled)
+        {
+            TempData["SecurityError"] = "MFA is already enabled. Verify your password before disabling it, then set it up again.";
+            return RedirectToAction(nameof(Security));
+        }
         var secret = _totp.GenerateSecret();
         user.MfaSecretProtected = _mfaProtector.Protect(secret);
         user.MfaEnabled = false;
@@ -144,11 +167,21 @@ public class AccountController : Controller
     [HttpPost]
     [ValidateAntiForgeryToken]
     [Authorize]
+    [EnableRateLimiting("auth")]
     public async Task<IActionResult> ConfirmMfa(string code, CancellationToken ct)
     {
         var user = await _db.Users.FindAsync(new object[] { User.RequireUserId() }, ct);
         if (user?.MfaSecretProtected is null) return BadRequest("Start MFA setup first.");
-        var secret = _mfaProtector.Unprotect(user.MfaSecretProtected);
+        string secret;
+        try { secret = _mfaProtector.Unprotect(user.MfaSecretProtected); }
+        catch (CryptographicException)
+        {
+            TempData["SecurityError"] = "MFA setup data could not be decrypted. Start setup again.";
+            user.MfaSecretProtected = null;
+            user.MfaEnabled = false;
+            await _db.SaveChangesAsync(ct);
+            return RedirectToAction(nameof(Security));
+        }
         if (!_totp.Verify(secret, code))
         {
             TempData["SecurityError"] = "Authenticator code was invalid.";
@@ -162,10 +195,12 @@ public class AccountController : Controller
     [HttpPost]
     [ValidateAntiForgeryToken]
     [Authorize]
+    [EnableRateLimiting("auth")]
     public async Task<IActionResult> DisableMfa(string password, CancellationToken ct)
     {
         var user = await _db.Users.FindAsync(new object[] { User.RequireUserId() }, ct);
-        if (user is null || !PasswordHasher.Verify(password, user.PasswordHash)) return Forbid();
+        if (user is null || string.IsNullOrEmpty(password) || password.Length > 256 ||
+            !PasswordHasher.Verify(password, user.PasswordHash)) return Forbid();
         user.MfaEnabled = false;
         user.MfaSecretProtected = null;
         await _db.SaveChangesAsync(ct);
@@ -177,14 +212,26 @@ public class AccountController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("auth")]
     public async Task<IActionResult> ResetPassword(string userName, string recoveryCode, string newPassword, CancellationToken ct)
     {
-        if (newPassword.Length < 12)
+        if (string.IsNullOrEmpty(newPassword) || newPassword.Length < 12 || newPassword.Length > 256)
         {
-            ModelState.AddModelError("", "New password must be at least 12 characters.");
+            ModelState.AddModelError("", "New password must be 12–256 characters.");
             return View();
         }
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.UserName == userName, ct);
+        if (userName is not { Length: <= 256 } || recoveryCode is not { Length: 32 } ||
+            recoveryCode.Any(c => !(c is >= '0' and <= '9' or >= 'A' and <= 'F' or >= 'a' and <= 'f')))
+        {
+            ModelState.AddModelError("", "Invalid username or recovery code.");
+            return View();
+        }
+        await using var transaction = await _db.Database.BeginTransactionAsync(ct);
+        // Recovery codes are single-use. The lock closes the race where two simultaneous
+        // requests could both verify the old code before either rotates it.
+        await _db.Database.ExecuteSqlRawAsync("SELECT pg_advisory_xact_lock(764831246);", ct);
+        var normalizedUserName = userName?.Trim().ToLowerInvariant() ?? string.Empty;
+        var user = await _db.Users.FirstOrDefaultAsync(u => u.UserName.ToLower() == normalizedUserName, ct);
         if (user?.RecoveryCodeHash is null || !PasswordHasher.Verify(recoveryCode, user.RecoveryCodeHash))
         {
             ModelState.AddModelError("", "Invalid username or recovery code.");
@@ -197,6 +244,7 @@ public class AccountController : Controller
         var replacement = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
         user.RecoveryCodeHash = PasswordHasher.Hash(replacement);
         await _db.SaveChangesAsync(ct);
+        await transaction.CommitAsync(ct);
         TempData["RecoveryCode"] = replacement;
         return RedirectToAction(nameof(RecoveryCode));
     }
