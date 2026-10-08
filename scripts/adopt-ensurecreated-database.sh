@@ -23,7 +23,7 @@ require_env LAP_ADOPTION_CONFIRM_WRITERS_STOPPED
 [[ "$LAP_ADOPTION_CONFIRM_WRITERS_STOPPED" == "I_STOPPED_ALL_WRITERS" ]] || \
   fail "stop every web instance, worker, and other database writer, then set LAP_ADOPTION_CONFIRM_WRITERS_STOPPED=I_STOPPED_ALL_WRITERS."
 
-for command_name in dotnet psql pg_dump pg_restore python3 cmp mktemp git; do
+for command_name in dotnet psql pg_dump pg_restore python3 cmp diff sed mktemp git; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command '$command_name' is not installed."
 done
 
@@ -339,14 +339,24 @@ dump_public_schema() {
     --file="$output" --dbname="$uri"
 }
 
+compare_schema_or_refuse() {
+  local expected="$1"
+  local actual="$2"
+  local reason="$3"
+  if cmp -s "$expected" "$actual"; then return 0; fi
+  printf 'Public-schema DDL differs (showing at most the first 100 unified-diff lines):\n' >&2
+  diff -u -- "$expected" "$actual" | sed -n '1,100p' || true
+  fail "$reason"
+}
+
 printf 'Comparing the saved database schema against the committed InitialCreate migration ...\n'
 dump_public_schema "$restore_url" "$work_dir/backup-schema.sql"
 dump_public_schema "$reference_url" "$work_dir/migration-schema.sql"
 dump_public_schema "$target_url" "$work_dir/target-schema-before.sql"
-cmp -s "$work_dir/backup-schema.sql" "$work_dir/migration-schema.sql" || \
-  fail "the restored backup schema does not exactly match InitialCreate; target was not changed."
-cmp -s "$target-schema-before.sql" "$work_dir/backup-schema.sql" || \
-  fail "the live target schema differs from the verified backup; target was not changed."
+compare_schema_or_refuse "$work_dir/migration-schema.sql" "$work_dir/backup-schema.sql" \
+  "the restored backup schema does not exactly match InitialCreate; target was not changed."
+compare_schema_or_refuse "$work_dir/backup-schema.sql" "$work_dir/target-schema-before.sql" \
+  "the live target schema differs from the verified backup; target was not changed."
 
 schema_fingerprint="$(python3 - "$work_dir/backup-schema.sql" <<'PY'
 import hashlib
@@ -433,8 +443,8 @@ PY
 assert_no_target_sessions
 assert_history_absent
 dump_public_schema "$target_url" "$work_dir/target-schema-immediately-before.sql"
-cmp -s "$work_dir/target-schema-before.sql" "$work_dir/target-schema-immediately-before.sql" || \
-  fail "target schema changed during validation; no migration-history row was inserted."
+compare_schema_or_refuse "$work_dir/target-schema-before.sql" "$work_dir/target-schema-immediately-before.sql" \
+  "target schema changed during validation; no migration-history row was inserted."
 printf 'Schema matches (SHA-256 %s). Applying only the EF migration-history baseline transactionally ...\n' "$schema_fingerprint"
 psql --no-psqlrc --set=ON_ERROR_STOP=1 --dbname="$target_url" --file="$work_dir/adopt-history.sql"
 
@@ -447,8 +457,8 @@ psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align --field-separato
 cmp -s "$work_dir/migration-history.tsv" "$work_dir/target-history.tsv" || \
   fail "post-adoption EF history rows differ from the reference; keep the backup and investigate before starting the app."
 dump_public_schema "$target_url" "$work_dir/target-schema-after.sql"
-cmp -s "$work_dir/target-schema-before.sql" "$work_dir/target-schema-after.sql" || \
-  fail "post-adoption application schema changed unexpectedly; keep the backup and investigate before starting the app."
+compare_schema_or_refuse "$work_dir/target-schema-before.sql" "$work_dir/target-schema-after.sql" \
+  "post-adoption application schema changed unexpectedly; keep the backup and investigate before starting the app."
 
 printf 'Adoption completed for %s. Verified backup: %s\n' "$target_database" "$backup_path"
 printf 'Only public."__EFMigrationsHistory" was added, with the exact InitialCreate row. Start the application and verify readiness before restoring normal traffic.\n'
