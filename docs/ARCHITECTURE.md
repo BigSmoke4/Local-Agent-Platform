@@ -58,7 +58,7 @@ Cookie authentication is used for the MVC UI and API-key authentication for `/ap
 
 ## Testing and verification
 
-`LocalAgentPlatform.Domain.Tests` covers pure policies/parsers. `LocalAgentPlatform.Integration.Tests` exercises real EF Core/PostgreSQL, filesystem, process, and Roslyn behavior; the PostgreSQL fixture requires a real database. CI configures a PostgreSQL service, but tests are not considered verified until the workflow or an equivalent local run succeeds. This environment did not have the .NET SDK, so its current build/test status is explicitly unverified.
+`LocalAgentPlatform.Domain.Tests` covers pure policies/parsers. `LocalAgentPlatform.Integration.Tests` exercises real EF Core/PostgreSQL, filesystem, process, and Roslyn behavior; the PostgreSQL fixture requires a real database. The current GitHub Actions PR run passed the .NET Release build, Domain tests, PostgreSQL integration tests, and Docker image build. This authoring sandbox did not have the .NET SDK, so those results were obtained on the CI runner rather than locally.
 
 Security verification scans the repository afresh rather than trusting the incremental index. It rejects out-of-root/non-regular paths and enforces traversal, file-count, size, byte, and finding limits. A scan exception or incomplete coverage does not produce a passing verification run. The regex rules are a narrow heuristic, not a general SAST engine.
 

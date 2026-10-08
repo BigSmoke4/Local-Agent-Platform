@@ -104,7 +104,7 @@ Tool execution includes:
 - Serilog structured logging.
 - OpenTelemetry ASP.NET Core/HTTP tracing.
 - Dockerfile + Docker Compose.
-- GitHub Actions CI for VS Code client tests, .NET restore/build/unit/PostgreSQL integration tests, and Docker build.
+- GitHub Actions CI for VS Code Node and Extension Host tests, .NET restore/build/unit/PostgreSQL integration tests, EF baseline generation, and Docker build.
 - **GitHub Actions CD** publishes images to GHCR and can deploy over SSH to a protected `production` environment when deployment variables/secrets are configured.
 
 ## Repository layout
@@ -171,13 +171,13 @@ Open:
 http://localhost:8080
 ```
 
-On a brand-new database the startup code bootstraps the EF schema with `EnsureCreatedAsync()` if the assembly contains no migrations. For a conventional long-term EF migration history, generate and commit a baseline migration using:
+Until an EF baseline is committed, a brand-new database bootstraps with `EnsureCreatedAsync()`. CI generates the baseline as an artifact when it is missing; review and commit that migration/snapshot before production schema evolution. You can also generate it locally with the .NET 8 SDK:
 
 ```bash
 ./scripts/create-baseline-migration.sh
 ```
 
-After a migration exists, startup automatically uses `Database.MigrateAsync()`.
+After a migration is committed, startup automatically uses `Database.MigrateAsync()`.
 
 ## Run directly
 
