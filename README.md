@@ -104,7 +104,7 @@ Tool execution includes:
 - Serilog structured logging.
 - OpenTelemetry ASP.NET Core/HTTP tracing instrumentation; console export is Development-only and a production exporter/retention policy must be configured separately.
 - Dockerfile + Docker Compose.
-- GitHub Actions CI for VS Code Node and Extension Host tests, live-platform E2E harness safety tests, the disposable .NET fixture build/test, .NET restore/build/unit/PostgreSQL integration tests, EF model-snapshot validation and migration against fresh PostgreSQL, Docker image build, and a hardened container runtime smoke test (live health and non-root UID). The opt-in live model/platform session itself is not run in CI.
+- GitHub Actions CI for VS Code Node and Extension Host tests, live-platform E2E harness safety tests, the disposable .NET fixture build/test, .NET restore/build/unit/PostgreSQL integration tests, EF model-snapshot validation and migration against fresh PostgreSQL, Docker image build, and a Production-mode hardened container smoke test (live health, exact Host filtering, disabled Swagger, Data Protection key-ring directory permissions, and non-root UID). The opt-in live model/platform session itself is not run in CI.
 - **GitHub Actions CD** publishes images to GHCR and can deploy over SSH to a protected `production` environment when deployment variables/secrets are configured.
 
 ## Repository layout
