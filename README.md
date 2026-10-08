@@ -272,7 +272,7 @@ export LAP_OLLAMA_MODEL='llama3.2:3b'
 ./scripts/run-live-tests.sh
 ```
 
-`LAP_RUN_LIVE_TESTS=1` prevents accidental model-dependent CI failures while still keeping a real local-runtime test suite in the repository.
+The live Ollama test is reported as **skipped**, not passed, unless `LAP_RUN_LIVE_TESTS=1` is set. When enabled, it requires a reachable Ollama server with the configured model already pulled; set `LAP_OLLAMA_URL` and `LAP_OLLAMA_MODEL` as needed.
 
 ## Load/performance testing
 
