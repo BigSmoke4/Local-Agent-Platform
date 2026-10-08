@@ -72,7 +72,41 @@ jobs:
       - name: Integration tests (real Postgres via the service container above)
         env:
           ConnectionStrings__PlatformDb: "Host=localhost;Port=5432;Database=local_agent_platform_test;Username=postgres;Password=postgres"
-        run: dotnet test tests/LocalAgentPlatform.Integration.Tests/LocalAgentPlatform.Integration.Tests.csproj -c Release --logger "trx;LogFileName=integration-tests.trx"
+        run: |
+          set +e
+          dotnet test tests/LocalAgentPlatform.Integration.Tests/LocalAgentPlatform.Integration.Tests.csproj -c Release --logger "trx;LogFileName=integration-tests.trx"
+          test_exit=$?
+          set -e
+          if [ "$test_exit" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          def escape(value):
+              return value.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+
+          result_files = list(Path('tests/LocalAgentPlatform.Integration.Tests').rglob('integration-tests.trx'))
+          failures = []
+          for result_file in result_files:
+              root = ET.parse(result_file).getroot()
+              for result in root.iter():
+                  if not result.tag.endswith('UnitTestResult') or result.attrib.get('outcome') not in {'Failed', 'Error', 'Timeout', 'Aborted'}:
+                      continue
+                  test_name = result.attrib.get('testName', 'Unknown integration test')
+                  message = ''
+                  for node in result.iter():
+                      if node.tag.endswith('Message') and node.text:
+                          message = node.text.strip()
+                          break
+                  failures.append((test_name, message))
+
+          if not failures:
+              print('::error title=Integration test failure::dotnet test failed; no failed test cases were found in TRX output.')
+          for test_name, message in failures:
+              print(f'::error title=Integration test failed::{escape(test_name + ": " + message[:1200])}')
+          PY
+          fi
+          exit "$test_exit"
 
       - name: Require successful EF baseline generation
         if: steps.ef-baseline.outcome == 'failure'
