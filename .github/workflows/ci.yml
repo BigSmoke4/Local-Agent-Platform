@@ -63,21 +63,27 @@ jobs:
           set -o pipefail
           bash -x ./scripts/create-baseline-migration.sh 2>&1 | tee ef-baseline.log
 
-      - name: Publish generated baseline source for review
+      - name: Expose generated baseline source for review
         if: steps.ef-baseline.outcome == 'success'
         run: |
-          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
+          import base64
+          import json
           from pathlib import Path
 
           migration_dir = Path('src/Shared/Data/Migrations')
-          migration_files = sorted(migration_dir.glob('*.cs'))
-          print('## Temporary generated EF baseline source')
-          print('Review this generated source and commit the migration files before production schema evolution.')
-          for migration_file in migration_files:
-              print(f'\n### `{migration_file.as_posix()}`\n')
-              print('```csharp')
-              print(migration_file.read_text())
-              print('```')
+          for migration_file in sorted(migration_dir.glob('*.cs')):
+              encoded = base64.b64encode(migration_file.read_bytes()).decode('ascii')
+              chunk_size = 5000
+              chunks = [encoded[i:i + chunk_size] for i in range(0, len(encoded), chunk_size)]
+              for index, chunk in enumerate(chunks, start=1):
+                  message = json.dumps({
+                      'file': migration_file.as_posix(),
+                      'part': index,
+                      'parts': len(chunks),
+                      'base64': chunk,
+                  }, separators=(',', ':'))
+                  print(f'::notice title=EF_BASELINE_SOURCE::{message}')
           PY
 
       - name: Build
