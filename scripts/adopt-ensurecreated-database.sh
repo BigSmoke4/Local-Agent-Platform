@@ -89,7 +89,7 @@ report_unexpected_error() {
   local status="$1"
   local line="$2"
   printf '::error file=scripts/adopt-ensurecreated-database.sh,line=%s,title=EnsureCreated adoption failed::Helper command failed (exit %s). A backup, if already created, remains at %s.\n' \
-    "$line" "$status" "${backup_path:-'(not created)'}" >&2
+    "$line" "$status" "${backup_path:-'(not created)'}"
 }
 
 cleanup() {

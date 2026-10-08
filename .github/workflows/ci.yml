@@ -147,7 +147,7 @@ jobs:
         run: |
           set -euo pipefail
           fail_ci() {
-            printf '::error title=EnsureCreated adoption CI fixture failed::%s\n' "$1" >&2
+            printf '::error title=EnsureCreated adoption CI fixture failed::%s\n' "$1"
             exit 1
           }
           admin_url='postgresql://postgres:postgres@localhost:5432/postgres'
