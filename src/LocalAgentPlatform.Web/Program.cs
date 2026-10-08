@@ -223,9 +223,18 @@ using (var migrationScope = app.Services.CreateScope())
     var dbContext = migrationScope.ServiceProvider.GetRequiredService<PlatformDbContext>();
     var migrations = dbContext.Database.GetMigrations();
     if (migrations.Any())
+    {
         await dbContext.Database.MigrateAsync();
+    }
+    else if (app.Environment.IsDevelopment())
+    {
+        await dbContext.Database.EnsureCreatedAsync();
+    }
     else
-        await dbContext.Database.EnsureCreatedAsync(); // bootstrap a fresh local install even before a baseline migration is committed
+    {
+        throw new InvalidOperationException(
+            "No EF Core migrations were found. Refusing to initialize a non-development database with EnsureCreatedAsync.");
+    }
 }
 
 // Seed ToolDefinition rows from the real registered ITool instances (Section 21) —

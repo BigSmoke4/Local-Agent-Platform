@@ -55,44 +55,34 @@ jobs:
       - name: Restore
         run: dotnet restore src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
 
-      - name: Generate EF baseline when none is committed
-        id: ef-baseline
-        if: ${{ hashFiles('src/Shared/Data/Migrations/*.cs') == '' }}
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          bash -x ./scripts/create-baseline-migration.sh 2>&1 | tee ef-baseline.log
-
-      - name: Expose generated baseline archive via check annotations
-        if: steps.ef-baseline.outcome == 'success'
+      - name: Require committed EF migration
         run: |
           python3 - <<'PY'
-          import base64
-          import io
-          import json
+          import re
           from pathlib import Path
-          from zipfile import ZIP_DEFLATED, ZipFile
 
           migration_dir = Path('src/Shared/Data/Migrations')
-          migration_files = sorted(migration_dir.glob('*.cs'))
-          archive_buffer = io.BytesIO()
-          with ZipFile(archive_buffer, 'w', compression=ZIP_DEFLATED) as archive:
-              for migration_file in migration_files:
-                  archive.write(migration_file, migration_file.name)
-          encoded = base64.b64encode(archive_buffer.getvalue()).decode('ascii')
-          chunk_size = 3000
-          chunks = [encoded[i:i + chunk_size] for i in range(0, len(encoded), chunk_size)]
-          for index, chunk in enumerate(chunks, start=1):
-              message = json.dumps({
-                  'part': index,
-                  'parts': len(chunks),
-                  'base64': chunk,
-              }, separators=(',', ':'))
-              print(f'::notice title=EF_BASELINE_ARCHIVE::{message}')
+          migrations = [path for path in migration_dir.glob('*.cs') if re.match(r'^\d{14}_.+\.cs$', path.name)]
+          if not migrations:
+              raise SystemExit('No committed EF migration found; create and commit the baseline migration.')
           PY
 
       - name: Build
         run: dotnet build src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj --no-restore -c Release
+
+      - name: Validate migration snapshot and apply to fresh PostgreSQL
+        env:
+          ConnectionStrings__PlatformDb: "Host=localhost;Port=5432;Database=local_agent_platform_test;Username=postgres;Password=postgres"
+        run: |
+          dotnet tool restore
+          dotnet ef migrations has-pending-model-changes \
+            --context PlatformDbContext \
+            --project src/Shared/Data/Shared.Data.csproj \
+            --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
+          dotnet ef database update \
+            --context PlatformDbContext \
+            --project src/Shared/Data/Shared.Data.csproj \
+            --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
 
       - name: Unit tests (pure Domain logic, no DB/network)
         run: dotnet test tests/LocalAgentPlatform.Domain.Tests/LocalAgentPlatform.Domain.Tests.csproj -c Release --logger "trx;LogFileName=domain-tests.trx"
@@ -136,34 +126,12 @@ jobs:
           fi
           exit "$test_exit"
 
-      - name: Require successful EF baseline generation
-        if: steps.ef-baseline.outcome == 'failure'
-        run: |
-          echo "EF baseline generation failed; inspect the uploaded ef-baseline.log artifact."
-          exit 1
-
-      - name: Publish EF baseline generation log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ef-baseline-generation-log
-          path: ef-baseline.log
-          if-no-files-found: ignore
-
       - name: Publish test results
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: "**/*.trx"
-
-      - name: Publish generated EF migration baseline
-        if: ${{ always() && hashFiles('src/Shared/Data/Migrations/*.cs') != '' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: ef-migration-baseline
-          path: src/Shared/Data/Migrations/
-          if-no-files-found: error
 
   docker-build:
     runs-on: ubuntu-24.04
