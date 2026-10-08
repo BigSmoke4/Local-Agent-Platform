@@ -46,7 +46,7 @@ Create a VSIX from this directory with:
 npx --yes @vscode/vsce package --no-dependencies
 ```
 
-The package includes the extension runtime, README, and MIT license; tests and development configuration are excluded. VSIX packaging has been verified, but the extension has not yet been launched in a VS Code Extension Host or tested against a live platform.
+The package includes the extension runtime, README, and MIT license; tests and development configuration are excluded. VSIX packaging and the Extension Host smoke test are verified in CI, but the extension has not been tested against a live platform.
 
 ## Tests
 

@@ -353,7 +353,7 @@ Production secrets remain outside the repository and should be supplied through 
 - Cross-file relationship generation is bounded to avoid unbounded indexing cost on very large repositories.
 - The semantic memory vector is currently stored as JSON for provider/database portability rather than requiring `pgvector`. For very large memory stores, migrate to `pgvector` or another ANN index.
 - NVIDIA and ROCm telemetry depend on vendor CLIs being installed and visible to the application process.
-- The VS Code extension has 23 passing Node API-client/command-flow/manifest/filesystem-safety tests and packages successfully as a VSIX. An Extension Host smoke test is configured in CI; the local run was blocked before VS Code launched by a TLS failure downloading VS Code. Live-platform end-to-end testing remains outstanding.
+- The VS Code extension has 23 passing Node API-client/command-flow/manifest/filesystem-safety tests and packages successfully as a VSIX. The VS Code Extension Host smoke test passes in GitHub Actions; local VS Code download was blocked by a TLS failure. Live-platform end-to-end testing remains outstanding.
 - CI can generate and publish a temporary EF baseline migration artifact when none is committed; review and check that baseline into source control before treating schema evolution as production-ready.
 
 ## Documentation

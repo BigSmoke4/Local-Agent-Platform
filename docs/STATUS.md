@@ -18,7 +18,7 @@ This file is the authoritative status ledger for the current repository. "Implem
 | Workspace-root allowlist | Implemented, unverified | Registration, repository/session listings, MVC/API operations, tool execution, indexing, context, verification, IDE open, and session telemetry enforce configured roots; default is fail-closed and Compose allows `/workspace`. Filesystem race resistance still depends on OS/container isolation. |
 | Symlink-aware workspace containment | Implemented, unverified | Shared path containment rejects workspace escapes through symlink/reparse-point segments; configured allowlist roots are snapshotted as physical paths; a repository root itself may not be a link, and symlink ancestors are canonicalized for containment; traversal does not follow reparse-point directories. |
 | Container privilege hardening | Implemented, unverified | A trusted entrypoint repairs key-ring volume ownership, then the web process drops to configurable non-root UID/GID; Compose drops all other capabilities, enables `no-new-privileges`, and binds published ports to loopback. Tool subprocesses still share the web UID/namespace and are not a hostile-code sandbox. |
-| IDE integration | Implemented, partially verified | Server-side VS Code CLI provider remains available. A standalone VS Code extension under `integrations/vscode` stores its API key in SecretStorage and supports allowed-repository discovery, opening available local checkouts/files, session start/list, task inspection, one-time approval, cancellation, and a changed-files group derived only from completed `FileWriteTool`/`FileEditTool` tasks. Changed files open only through the session's server repository ID, configured local path mapping, and the existing containment-checked file resolver. Its 23 Node API-client, command-flow, manifest-wiring, path-mapping, changed-file, and local-file containment tests pass. A VSIX package was built successfully with `@vscode/vsce`; an Extension Host smoke test is configured in CI, but the local attempt could not download VS Code because `update.code.visualstudio.com` reset the TLS connection. Live-platform end-to-end tests have not run. |
+| IDE integration | Implemented, partially verified | Server-side VS Code CLI provider remains available. A standalone VS Code extension under `integrations/vscode` stores its API key in SecretStorage and supports allowed-repository discovery, opening available local checkouts/files, session start/list, task inspection, one-time approval, cancellation, and a changed-files group derived only from completed `FileWriteTool`/`FileEditTool` tasks. Changed files open only through the session's server repository ID, configured local path mapping, and the existing containment-checked file resolver. Its 23 Node API-client, command-flow, manifest-wiring, path-mapping, changed-file, and local-file containment tests pass. A VSIX package was built successfully with `@vscode/vsce`, and the Extension Host smoke test passes in GitHub Actions. The local attempt could not download VS Code because `update.code.visualstudio.com` reset the TLS connection. Live-platform end-to-end tests have not run. |
 | Roles | Implemented | `Admin` and `User`; first user is Admin. |
 | MFA | Implemented | TOTP with Data Protection-protected secrets. |
 | Password recovery | Implemented | One-time recovery code, hashed at rest and rotated after reset. |
@@ -63,7 +63,10 @@ This authoring environment did not contain the .NET SDK, so a conventional EF-ge
 ## Validation to run after extraction
 
 ```bash
-(cd integrations/vscode && npm test)
+npm ci --prefix integrations/vscode
+npm --prefix integrations/vscode test
+xvfb-run -a npm --prefix integrations/vscode run test:extension-host
+npx --yes @vscode/vsce package --no-dependencies --out /tmp/local-agent-platform.vsix
 dotnet restore src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
 dotnet build src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj -c Release
 dotnet test tests/LocalAgentPlatform.Domain.Tests/LocalAgentPlatform.Domain.Tests.csproj -c Release
