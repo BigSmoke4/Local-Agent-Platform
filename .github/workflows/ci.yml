@@ -140,7 +140,60 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     needs: build-and-test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: local_agent_platform_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
+
       - name: Build Docker image
         run: docker build -t local-agent-platform:ci .
+
+      - name: Run hardened container against PostgreSQL
+        run: |
+          docker run --detach --name lap-runtime-smoke --network host \
+            --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
+            --security-opt no-new-privileges:true \
+            --volume "${{ github.workspace }}/workspace:/workspace" \
+            --volume lap-runtime-smoke-keyring:/var/lib/local-agent-platform/keyring \
+            --env ASPNETCORE_URLS=http://+:18080 \
+            --env ASPNETCORE_ENVIRONMENT=Development \
+            --env ConnectionStrings__PlatformDb="Host=localhost;Port=5432;Database=local_agent_platform_test;Username=postgres;Password=postgres" \
+            --env Repositories__AllowedRoots__0=/workspace \
+            --env DataProtection__KeyRingPath=/var/lib/local-agent-platform/keyring \
+            local-agent-platform:ci
+
+      - name: Verify live health and non-root process identity
+        run: |
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:18080/health/live >/dev/null; then
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' lap-runtime-smoke)" != "true" ]; then
+              docker logs lap-runtime-smoke
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --show-error http://127.0.0.1:18080/health/live
+          process_uid="$(docker exec lap-runtime-smoke cat /proc/1/status | awk '$1 == "Uid:" {print $2}')"
+          test "$process_uid" = "1000"
+
+      - name: Collect container logs
+        if: always()
+        run: docker logs --tail 200 lap-runtime-smoke 2>&1 || true
+
+      - name: Stop runtime smoke container
+        if: always()
+        run: docker rm --force lap-runtime-smoke || true
