@@ -161,10 +161,15 @@ jobs:
           target_url="$LAP_ADOPTION_DATABASE_URL"
           psql --no-psqlrc --set=ON_ERROR_STOP=1 "$target_url" \
             --command='CREATE TABLE public."UnexpectedLegacyTable" ("Id" integer NOT NULL)'
+          mismatch_log="$RUNNER_TEMP/ensurecreated-mismatch.log"
           if LAP_ADOPTION_BACKUP_FILE="$RUNNER_TEMP/ensurecreated-mismatch.dump" \
-            bash scripts/adopt-ensurecreated-database.sh; then
+            bash scripts/adopt-ensurecreated-database.sh >"$mismatch_log" 2>&1; then
+            cat "$mismatch_log"
             fail_ci 'Adoption unexpectedly accepted a mismatched schema.'
           fi
+          cat "$mismatch_log"
+          grep -Fq 'the restored backup schema does not exactly match InitialCreate' "$mismatch_log" || \
+            fail_ci "Mismatch fixture was refused for an unexpected reason: $(tail -n 5 "$mismatch_log" | tr '\n' ' ')"
           test -s "$RUNNER_TEMP/ensurecreated-mismatch.dump" || fail_ci 'Mismatched-schema run did not leave its pre-change backup.'
           test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-mismatch.dump")" = '600' || fail_ci 'Mismatch backup mode is not 0600.'
           history_exists="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
@@ -179,8 +184,15 @@ jobs:
           psql --no-psqlrc --set=ON_ERROR_STOP=1 "$target_url" \
             --command='DROP TABLE public."UnexpectedLegacyTable"'
 
-          LAP_ADOPTION_BACKUP_FILE="$RUNNER_TEMP/ensurecreated-adopted.dump" \
-            bash scripts/adopt-ensurecreated-database.sh
+          adoption_log="$RUNNER_TEMP/ensurecreated-adopted.log"
+          if LAP_ADOPTION_BACKUP_FILE="$RUNNER_TEMP/ensurecreated-adopted.dump" \
+            bash scripts/adopt-ensurecreated-database.sh >"$adoption_log" 2>&1; then
+            cat "$adoption_log"
+          else
+            adoption_exit=$?
+            cat "$adoption_log"
+            fail_ci "Positive adoption helper failed (exit $adoption_exit): $(tail -n 8 "$adoption_log" | tr '\n' ' ')"
+          fi
           test -s "$RUNNER_TEMP/ensurecreated-adopted.dump" || fail_ci 'Successful adoption did not leave its backup.'
           test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-adopted.dump")" = '600' || fail_ci 'Adoption backup mode is not 0600.'
           ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=lap_ensurecreated_adoption_test;Username=postgres;Password=postgres' \
