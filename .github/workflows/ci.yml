@@ -260,6 +260,11 @@ jobs:
 
       - name: Verify live health, persistent key-ring permissions, and non-root process identity
         run: |
+          runtime_smoke_failure() {
+            printf '::error title=Runtime smoke assertion failed::%s\n' "$1"
+            docker logs --tail 100 lap-runtime-smoke 2>&1 || true
+            exit 1
+          }
           for attempt in $(seq 1 45); do
             if curl --fail --silent \
               --header 'Host: lap-ci.example.test' \
@@ -280,25 +285,25 @@ jobs:
             --header 'X-Forwarded-Proto: https' \
             http://127.0.0.1:18080/health/live
           process_uid="$(docker exec lap-runtime-smoke cat /proc/1/status | awk '$1 == "Uid:" {print $2}')"
-          test "$process_uid" = "1000"
+          test "$process_uid" = "1000" || runtime_smoke_failure "PID 1 UID was '$process_uid', expected 1000."
           keyring_state="$(docker exec lap-runtime-smoke stat -c '%a:%u:%g' /var/lib/local-agent-platform/keyring)"
-          test "$keyring_state" = "700:1000:1000"
+          test "$keyring_state" = "700:1000:1000" || runtime_smoke_failure "Key-ring directory state was '$keyring_state', expected 700:1000:1000."
           login_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --header 'Host: lap-ci.example.test' \
             --header 'X-Forwarded-For: 192.0.2.10' \
             --header 'X-Forwarded-Proto: https' \
             http://127.0.0.1:18080/Account/Login)"
-          test "$login_status" = "200"
+          test "$login_status" = "200" || runtime_smoke_failure "GET /Account/Login returned HTTP $login_status, expected 200."
           key_file="$(docker exec lap-runtime-smoke find /var/lib/local-agent-platform/keyring -maxdepth 1 -type f -name 'key-*.xml' -print -quit)"
-          test -n "$key_file"
+          test -n "$key_file" || runtime_smoke_failure "No Data Protection key file was created by the login-page request."
           key_file_state="$(docker exec lap-runtime-smoke stat -c '%a:%u:%g' "$key_file")"
-          test "$key_file_state" = "600:1000:1000"
+          test "$key_file_state" = "600:1000:1000" || runtime_smoke_failure "Data Protection key file state was '$key_file_state', expected 600:1000:1000."
           rejected_host_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --header 'Host: attacker.example.invalid' http://127.0.0.1:18080/health/live)"
-          test "$rejected_host_status" = "400"
+          test "$rejected_host_status" = "400" || runtime_smoke_failure "Unapproved Host returned HTTP $rejected_host_status, expected 400."
           swagger_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --header 'Host: lap-ci.example.test' http://127.0.0.1:18080/swagger/v1/swagger.json)"
-          test "$swagger_status" = "404"
+          test "$swagger_status" = "404" || runtime_smoke_failure "Production Swagger endpoint returned HTTP $swagger_status, expected 404."
 
       - name: Collect container logs
         if: always()
