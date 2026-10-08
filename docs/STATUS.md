@@ -28,7 +28,7 @@ This file is the authoritative status ledger for the current repository. “Impl
 | Security/concurrency regression tests | Added, CI-verified | Domain and PostgreSQL integration suites pass in GitHub Actions, covering terminal/Git/file mutation, symlink/workspace boundaries, DAG validation, repository traversal, secret redaction, regex scanning, verified test summaries, failed-task propagation, cross-worker claim/cancellation, corrupt persisted task metadata, and file deletion/reappearance. |
 | Real Ollama HTTP test | Implemented, opt-in | Enabled with `LAP_RUN_LIVE_TESTS=1`; requires a live Ollama instance. |
 | Load-test suite | Implemented | k6 API/health scenario with thresholds; requires k6 and a running instance. |
-| CI | Implemented, latest PR run passed | 23 VS Code Node tests, VS Code Extension Host smoke test, .NET Release build, Domain tests, PostgreSQL integration tests, temporary EF baseline generation/artifact publication, Docker image build, and a hardened PostgreSQL-backed runtime smoke test (live health plus UID `1000`) passed in [GitHub Actions](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37734902841). |
+| CI | Implemented, verified in GitHub Actions | 23 VS Code Node tests, VS Code Extension Host smoke test, .NET Release build, Domain tests, PostgreSQL integration tests, temporary EF baseline generation/artifact publication, Docker image build, and a hardened PostgreSQL-backed runtime smoke test (live health plus UID `1000`) passed in [GitHub Actions](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37735619610). |
 | CD | Implemented/configurable | GHCR publish; optional SSH production deploy and readiness gate. |
 | Fresh-schema bootstrap | Implemented | Startup uses `EnsureCreatedAsync()` only when no EF migrations exist; otherwise `MigrateAsync()`. |
 
@@ -51,7 +51,7 @@ This file is the authoritative status ledger for the current repository. “Impl
 
 ## Schema migration status
 
-CI successfully generated and compiled the baseline migration, ran the build/tests against it, and published a temporary `ef-migration-baseline` artifact. The migration is not committed to the repository yet. For production schema evolution, review that artifact (or run `./scripts/create-baseline-migration.sh` with the .NET 8 SDK) and commit the migration/snapshot. Once committed, startup switches to `Database.MigrateAsync()` for fresh and existing databases.
+CI successfully generated and compiled the baseline migration, ran the build/tests against it, and published a temporary [`ef-migration-baseline` artifact](https://github.com/BigSmoke4/Local-Agent-Platform/actions/runs/37735619610#artifacts). The migration is not committed to the repository yet. For production schema evolution, review that artifact (or run `./scripts/create-baseline-migration.sh` with the .NET 8 SDK) and commit the migration/snapshot. Once committed, startup switches to `Database.MigrateAsync()` for fresh and existing databases.
 
 The sandbox lacks the .NET SDK. Attempts to retrieve the generated artifact and job logs from GitHub's Actions storage endpoints failed with `EOF`, so the generated migration files have not been brought into this checkout. Fresh installs still work through `EnsureCreatedAsync()` until the baseline is reviewed and committed.
 
