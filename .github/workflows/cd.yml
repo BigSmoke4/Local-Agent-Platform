@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   publish-image:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       image: ${{ steps.meta.outputs.tags }}
     steps:
@@ -38,7 +38,7 @@ jobs:
 
   deploy-production:
     needs: publish-image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
     if: ${{ vars.ENABLE_SSH_DEPLOY == 'true' }}
     steps:

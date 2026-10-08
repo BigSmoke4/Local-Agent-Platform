@@ -211,7 +211,7 @@ public sealed class ToolExecutionService
                     continue;
                 }
             }
-            redacted[key] = RedactSecrets(safeValue);
+            redacted[key] = RedactSecrets(safeValue) ?? string.Empty;
         }
         return redacted;
     }
