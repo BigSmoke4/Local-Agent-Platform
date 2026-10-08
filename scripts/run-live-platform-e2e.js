@@ -17,7 +17,6 @@ const VERIFICATION_DESCRIPTIONS = Object.freeze({
   BuildTool: 'Run an approved workspace build for verification. Build targets can execute repository code.',
   TestTool: 'Run approved workspace tests for verification. Tests execute repository code.'
 });
-const ALLOW_BUILD_AND_TEST_VALUE = 'I_APPROVE_BUILD_AND_TEST';
 const ALLOW_DISPOSABLE_REPOSITORY_VALUE = 'I_CONFIRM_THIS_REPOSITORY_IS_DISPOSABLE';
 
 let interrupted = false;
@@ -66,10 +65,6 @@ function readConfig(env = process.env) {
   if (env.LAP_E2E_CONFIRM_DISPOSABLE_REPOSITORY !== ALLOW_DISPOSABLE_REPOSITORY_VALUE) {
     fail(`Set LAP_E2E_CONFIRM_DISPOSABLE_REPOSITORY=${ALLOW_DISPOSABLE_REPOSITORY_VALUE} only after registering the dedicated disposable fixture repository.`);
   }
-  if (env.LAP_E2E_ALLOW_BUILD_AND_TEST !== ALLOW_BUILD_AND_TEST_VALUE) {
-    fail(`Set LAP_E2E_ALLOW_BUILD_AND_TEST=${ALLOW_BUILD_AND_TEST_VALUE} to explicitly authorize this test's exact, system-generated BuildTool and TestTool verification tasks. No other command or tool is auto-approved.`);
-  }
-
   const baseUrl = parseBaseUrl(requiredEnvironment(env, 'LAP_E2E_BASE_URL'));
   const apiKey = requiredEnvironment(env, 'LAP_E2E_API_KEY');
   if (!apiKey.startsWith('lap_')) fail('LAP_E2E_API_KEY does not have the expected lap_ prefix.');
@@ -293,6 +288,20 @@ function validateAllTasks(tasks, context) {
   return tasks.map(task => validateTask(task, context));
 }
 
+// This helper only observes persisted state. It deliberately receives no API client
+// and has no code path that can approve, resume, or otherwise mutate a session.
+function getSystemVerificationAwaitingHumanApproval(session, validatedTasks) {
+  const awaiting = validatedTasks.filter(entry => entry.task.status === 'AwaitingApproval');
+  if (awaiting.length === 0) return null;
+  if (!session || session.state !== 'AwaitingApproval') {
+    fail('The session has an approval-pending task but is not in AwaitingApproval state; no approval was sent.');
+  }
+  if (awaiting.length !== 1 || awaiting[0].kind !== 'verification') {
+    fail('The live session requested approval for something other than one exact system verification task; no approval was sent.');
+  }
+  return awaiting[0];
+}
+
 function assertSuccessfulSession(session, validatedTasks, repositoryPath, targetName, marker) {
   if (session.state !== 'Completed') fail(`Live agent session finished in ${session.state || '(empty state)'}, not Completed: ${session.failureReason || 'no failure reason was returned.'}`);
 
@@ -326,10 +335,19 @@ function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
-function createApiClient(baseUrl, apiKey) {
+function createApiClient(baseUrl, apiKey, fetchImplementation = globalThis.fetch) {
   return async function request(route, { method = 'GET', body, authenticated = true, expectedStatuses = [200] } = {}) {
     const url = new URL(route, baseUrl);
     if (url.origin !== baseUrl) fail('Refusing to send credentials outside the configured platform origin.');
+    let decodedPath;
+    try {
+      decodedPath = decodeURIComponent(url.pathname);
+    } catch {
+      fail('Refusing to call an API endpoint with an invalid encoded path.');
+    }
+    if (/^\/api\/agent\/sessions\/[^/]+\/approve\/?$/i.test(decodedPath)) {
+      fail('This live E2E harness never sends approval requests; a human must review them in the platform UI.');
+    }
     const headers = { Accept: 'application/json' };
     if (authenticated) headers['X-Api-Key'] = apiKey;
     const options = { method, headers, redirect: 'error', signal: AbortSignal.timeout(60_000) };
@@ -341,7 +359,7 @@ function createApiClient(baseUrl, apiKey) {
     let response;
     let text;
     try {
-      response = await fetch(url, options);
+      response = await fetchImplementation(url, options);
       text = await response.text();
     } catch (error) {
       if (error && error.name === 'TimeoutError') fail(`Request to ${route} timed out after 60 seconds.`);
@@ -417,7 +435,6 @@ async function runLivePlatformE2E(env = process.env) {
   const request = createApiClient(config.baseUrl, config.apiKey);
   let sessionId = null;
   let success = false;
-  let verificationApproved = false;
 
   try {
     console.log(`Checking live platform readiness at ${config.baseUrl} ...`);
@@ -476,30 +493,29 @@ async function runLivePlatformE2E(env = process.env) {
         fail(`The live agent session finished in ${snapshot.session.state}: ${snapshot.session.failureReason || 'no failure reason was returned.'}`);
       }
 
-      const awaiting = validatedTasks.filter(entry => entry.task.status === 'AwaitingApproval');
-      if (awaiting.length > 0) {
-        if (snapshot.session.state !== 'AwaitingApproval') {
-          fail('The session has an approval-pending task but is not in AwaitingApproval state; no approval was sent.');
-        }
-        if (awaiting.length !== 1 || awaiting[0].kind !== 'verification') {
-          fail('The live session requested approval for something other than one exact system verification task; no approval was sent.');
-        }
+      const buildAlreadyCompleted = validatedTasks.some(entry =>
+        entry.kind === 'verification' && entry.toolName === 'BuildTool' && entry.task.status === 'Completed');
+      const pendingVerification = getSystemVerificationAwaitingHumanApproval(snapshot.session, validatedTasks);
+      if (pendingVerification) {
         assertWorkspaceState(config.localRepositoryPath, targetName, {
           expectTarget: fs.existsSync(targetPath),
-          allowBuildArtifacts: verificationApproved
+          allowBuildArtifacts: buildAlreadyCompleted
         });
         if (!fs.existsSync(targetPath)) {
-          fail('The platform reached build/test verification before creating the exact marker file; refusing to approve verification.');
+          fail('The platform reached build/test verification before creating the exact marker file; the pending task was left untouched.');
         }
         assertTargetContent(config.localRepositoryPath, targetName, marker);
-        const entry = awaiting[0];
-        console.log(`Approving the exact system-generated ${entry.toolName} task after explicit environment opt-in; no model-planned command is approved.`);
-        await request(`/api/agent/sessions/${encodeURIComponent(sessionId)}/approve`, {
-          method: 'POST', body: { taskId: entry.task.id }, expectedStatuses: [202]
-        });
-        verificationApproved = true;
-        await delay(config.pollIntervalMs);
-        continue;
+        console.log(`PAUSED: system-generated ${pendingVerification.toolName} task ${pendingVerification.task.id || '(unknown ID)'} is AwaitingApproval.`);
+        console.log('No approval request was sent. The session and marker file were left intact; review the task and approve it yourself in the platform UI if appropriate.');
+        return {
+          outcome: 'AwaitingApproval',
+          sessionId,
+          taskId: pendingVerification.task.id,
+          toolName: pendingVerification.toolName,
+          modelId: config.modelId,
+          repositoryId: config.repositoryId,
+          finalState: snapshot.session.state
+        };
       }
 
       if (TERMINAL_STATES.has(snapshot.session.state)) {
@@ -512,12 +528,11 @@ async function runLivePlatformE2E(env = process.env) {
         break;
       }
 
-      // Before any explicit BuildTool approval, there must be no ignored output from
-      // the model. After that approval only the fixture's dotnet bin/ and obj/ are
-      // expected ignored directories.
+      // Ignored build outputs are acceptable only after a persisted BuildTool task
+      // shows Completed (for example, following a real human approval in the UI).
       assertWorkspaceState(config.localRepositoryPath, targetName, {
         expectTarget: fs.existsSync(targetPath),
-        allowBuildArtifacts: verificationApproved
+        allowBuildArtifacts: buildAlreadyCompleted
       });
       if (fs.existsSync(targetPath)) assertTargetContent(config.localRepositoryPath, targetName, marker);
       await delay(config.pollIntervalMs);
@@ -545,7 +560,12 @@ async function runLivePlatformE2E(env = process.env) {
 if (require.main === module) {
   process.on('SIGINT', () => { interrupted = true; });
   process.on('SIGTERM', () => { interrupted = true; });
-  runLivePlatformE2E().catch(error => {
+  runLivePlatformE2E().then(result => {
+    if (result && result.outcome === 'AwaitingApproval') {
+      // This is an intentional incomplete E2E checkpoint, not a successful build/test run.
+      process.exitCode = 2;
+    }
+  }).catch(error => {
     const message = error instanceof Error ? error.message : String(error);
     const secret = String(process.env.LAP_E2E_API_KEY || '');
     console.error(`Live platform E2E failed: ${secret ? message.split(secret).join('[REDACTED]') : message}`);
@@ -554,11 +574,12 @@ if (require.main === module) {
 }
 
 module.exports = {
-  ALLOW_BUILD_AND_TEST_VALUE,
   ALLOW_DISPOSABLE_REPOSITORY_VALUE,
   FIXTURE_HASHES,
   assertTargetContent,
   assertWorkspaceState,
+  createApiClient,
+  getSystemVerificationAwaitingHumanApproval,
   makeUserRequest,
   parseBaseUrl,
   parseTaskArguments,

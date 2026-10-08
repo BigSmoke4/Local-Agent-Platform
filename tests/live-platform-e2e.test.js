@@ -50,7 +50,7 @@ test('accepts loopback HTTP and rejects remote cleartext or credential-bearing p
   assert.throws(() => e2e.parseBaseUrl('https://platform.example.test/app'), /origin-only/);
 });
 
-test('requires explicit disposable-repository and build/test approvals before any API request', () => {
+test('requires explicit disposable-repository confirmation before any API request', () => {
   const baseEnv = {
     LAP_E2E_BASE_URL: 'http://localhost:8080',
     LAP_E2E_API_KEY: 'lap_test_not_a_real_key',
@@ -60,14 +60,9 @@ test('requires explicit disposable-repository and build/test approvals before an
     LAP_E2E_MODEL_ID: 'test-model:1b'
   };
   assert.throws(() => e2e.readConfig(baseEnv), /LAP_E2E_CONFIRM_DISPOSABLE_REPOSITORY/);
-  assert.throws(() => e2e.readConfig({
-    ...baseEnv,
-    LAP_E2E_CONFIRM_DISPOSABLE_REPOSITORY: e2e.ALLOW_DISPOSABLE_REPOSITORY_VALUE
-  }), /LAP_E2E_ALLOW_BUILD_AND_TEST/);
   assert.doesNotThrow(() => e2e.readConfig({
     ...baseEnv,
-    LAP_E2E_CONFIRM_DISPOSABLE_REPOSITORY: e2e.ALLOW_DISPOSABLE_REPOSITORY_VALUE,
-    LAP_E2E_ALLOW_BUILD_AND_TEST: e2e.ALLOW_BUILD_AND_TEST_VALUE
+    LAP_E2E_CONFIRM_DISPOSABLE_REPOSITORY: e2e.ALLOW_DISPOSABLE_REPOSITORY_VALUE
   }));
 });
 
@@ -91,22 +86,55 @@ test('permits only one exact, new marker-file write and read-only fixture inspec
   assert.throws(() => e2e.validateTask({ type: 'ToolCall', toolName: 'FileEditTool', argumentsJson: '{}' }, context), /Only fixture reads\/listing/);
 });
 
-test('only recognizes the exact system-generated verification tasks for explicit approval', () => {
+test('observes exact system verification approvals and never calls the approval endpoint', () => {
   const build = {
+    id: 'build-task',
     type: 'Verification', toolName: 'BuildTool', argumentsJson: '{}',
     description: 'Run an approved workspace build for verification. Build targets can execute repository code.',
     status: 'AwaitingApproval'
   };
   const testTask = {
+    id: 'test-task',
     type: 'Verification', toolName: 'TestTool', argumentsJson: '{}',
     description: 'Run approved workspace tests for verification. Tests execute repository code.',
     status: 'AwaitingApproval'
   };
-  assert.equal(e2e.validateTask(build, {}).toolName, 'BuildTool');
-  assert.equal(e2e.validateTask(testTask, {}).toolName, 'TestTool');
+  const buildEntry = e2e.validateTask(build, {});
+  const testEntry = e2e.validateTask(testTask, {});
+  assert.equal(e2e.getSystemVerificationAwaitingHumanApproval({ state: 'AwaitingApproval' }, [buildEntry]), buildEntry);
+  assert.equal(e2e.getSystemVerificationAwaitingHumanApproval({ state: 'AwaitingApproval' }, [testEntry]), testEntry);
+  assert.equal(e2e.getSystemVerificationAwaitingHumanApproval({ state: 'Running' }, []), null);
+  assert.throws(() => e2e.getSystemVerificationAwaitingHumanApproval({ state: 'Running' }, [buildEntry]), /no approval was sent/);
+  assert.throws(() => e2e.getSystemVerificationAwaitingHumanApproval(
+    { state: 'AwaitingApproval' }, [buildEntry, testEntry]
+  ), /no approval was sent/);
   assert.throws(() => e2e.validateTask({ ...build, type: 'ToolCall' }, {}), /Refusing to run or approve/);
   assert.throws(() => e2e.validateTask({ ...build, argumentsJson: '{"target":"."}' }, {}), /unexpected verification task/);
   assert.throws(() => e2e.validateTask({ ...build, description: 'Model-planned build task' }, {}), /unexpected verification task/);
+
+  const runnerSource = fs.readFileSync(require.resolve('../scripts/run-live-platform-e2e'), 'utf8');
+  assert.doesNotMatch(runnerSource, /request\s*\(\s*(?:'[^']*\/approve|"[^"]*\/approve|`[^`]*\/approve)/i);
+  assert.doesNotMatch(runnerSource, /LAP_E2E_ALLOW_BUILD_AND_TEST|verificationApproved/);
+});
+
+test('the API client blocks session approval routes before any network request', async () => {
+  const networkCalls = [];
+  const request = e2e.createApiClient('https://platform.example.test', 'lap_test_key', async (...args) => {
+    networkCalls.push(args);
+    throw new Error('The approval guard should block before fetch.');
+  });
+
+  await assert.rejects(
+    request('/api/agent/sessions/01234567-89ab-4cde-8f01-23456789abcd/approve', {
+      method: 'POST', body: { taskId: 'build-task' }
+    }),
+    /never sends approval requests/
+  );
+  await assert.rejects(
+    request('/api/agent/sessions/session-id/%61pprove/', { method: 'GET' }),
+    /never sends approval requests/
+  );
+  assert.deepEqual(networkCalls, []);
 });
 
 test('detects workspace mutations and verifies/removes no unexpected target content', t => {

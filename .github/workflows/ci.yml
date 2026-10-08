@@ -132,6 +132,68 @@ jobs:
           fi
           exit "$test_exit"
 
+      - name: Install PostgreSQL client for adoption cutover verification
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client
+
+      - name: Verify safe adoption of a pre-migration EnsureCreated database
+        env:
+          PGPASSWORD: postgres
+          LAP_ADOPTION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lap_ensurecreated_adoption_test
+          LAP_ADOPTION_ADMIN_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          LAP_ADOPTION_CONFIRM_TARGET_DATABASE: lap_ensurecreated_adoption_test
+          LAP_ADOPTION_CONFIRM_WRITERS_STOPPED: I_STOPPED_ALL_WRITERS
+        run: |
+          admin_url='postgresql://postgres:postgres@localhost:5432/postgres'
+          psql --no-psqlrc --set=ON_ERROR_STOP=1 "$admin_url" \
+            --command='CREATE DATABASE lap_ensurecreated_adoption_test TEMPLATE template0'
+          ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=lap_ensurecreated_adoption_test;Username=postgres;Password=postgres' \
+            LAP_RUN_ENSURECREATED_ADOPTION_FIXTURE=1 \
+            dotnet test tests/LocalAgentPlatform.Integration.Tests/LocalAgentPlatform.Integration.Tests.csproj \
+              -c Release --filter FullyQualifiedName~EnsureCreatedAdoptionFixtureTests
+
+          target_url="$LAP_ADOPTION_DATABASE_URL"
+          psql --no-psqlrc --set=ON_ERROR_STOP=1 "$target_url" \
+            --command='CREATE TABLE public."UnexpectedLegacyTable" ("Id" integer NOT NULL)'
+          if LAP_ADOPTION_BACKUP_FILE="$RUNNER_TEMP/ensurecreated-mismatch.dump" \
+            bash scripts/adopt-ensurecreated-database.sh; then
+            echo 'Adoption unexpectedly accepted a mismatched schema.' >&2
+            exit 1
+          fi
+          test -s "$RUNNER_TEMP/ensurecreated-mismatch.dump"
+          test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-mismatch.dump")" = '600'
+          history_exists="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command="SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = '__EFMigrationsHistory')::text")"
+          test "$history_exists" = 'false'
+          unexpected_table_exists="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command="SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'UnexpectedLegacyTable')::text")"
+          test "$unexpected_table_exists" = 'true'
+          sentinel_count="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command="SELECT count(*)::text FROM public.\"Projects\" WHERE \"Name\" = 'ensurecreated-adoption-sentinel'")"
+          test "$sentinel_count" = '1'
+          psql --no-psqlrc --set=ON_ERROR_STOP=1 "$target_url" \
+            --command='DROP TABLE public."UnexpectedLegacyTable"'
+
+          LAP_ADOPTION_BACKUP_FILE="$RUNNER_TEMP/ensurecreated-adopted.dump" \
+            bash scripts/adopt-ensurecreated-database.sh
+          test -s "$RUNNER_TEMP/ensurecreated-adopted.dump"
+          test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-adopted.dump")" = '600'
+          ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=lap_ensurecreated_adoption_test;Username=postgres;Password=postgres' \
+            dotnet ef database update \
+              --context PlatformDbContext \
+              --project src/Shared/Data/Shared.Data.csproj \
+              --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
+          migration_count="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command='SELECT count(*)::text FROM public."__EFMigrationsHistory"')"
+          test "$migration_count" = '1'
+          migration_id="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command='SELECT "MigrationId" FROM public."__EFMigrationsHistory"')"
+          test "$migration_id" = '20261008063621_InitialCreate'
+          sentinel_count="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command="SELECT count(*)::text FROM public.\"Projects\" WHERE \"Name\" = 'ensurecreated-adoption-sentinel'")"
+          test "$sentinel_count" = '1'
+
       - name: Publish test results
         if: always()
         uses: actions/upload-artifact@v7

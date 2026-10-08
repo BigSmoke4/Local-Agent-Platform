@@ -277,9 +277,9 @@ The live Ollama test is reported as **skipped**, not passed, unless `LAP_RUN_LIV
 
 ### Opt-in live platform/API end-to-end test
 
-`scripts/run-live-platform-e2e.js` drives a real authenticated API session against an already-running platform. It checks live readiness, model/repository discovery, creates a session through `/api/agent/sessions`, polls persisted session/task state, verifies one exact file write, and checks the real BuildTool/TestTool outputs. It calls the configured Ollama model through the platform; it does not stub the model or start a fake web server. The test runner itself does not launch VS Code, so a live extension-host/UI interaction is still a separate verification gap.
+`scripts/run-live-platform-e2e.js` drives a real authenticated API session against an already-running platform. It checks readiness, model/repository discovery, creates a session through `/api/agent/sessions`, polls persisted task state, and verifies one exact file write from the configured Ollama model. If the platform reaches its system-generated BuildTool or TestTool approval gate, the harness reports `AwaitingApproval`, exits with code 2, and leaves the session and marker file intact. It never calls the approval endpoint or runs verification tasks on the operator's behalf. Review and approve a pending task yourself in the platform UI only if appropriate; this stopped harness does not resume afterward and makes no claim that BuildTool/TestTool succeeded. The test runner does not launch VS Code, so a live extension-host/UI interaction remains a separate verification gap.
 
-This test executes repository build/test code and intentionally requires both an exact disposable-fixture repository and two explicit opt-ins. Never point it at a real project or valuable working tree.
+The harness requires an exact disposable-fixture repository and one explicit disposable-repository confirmation. Never point it at a real project or valuable working tree. It calls a real platform and real configured Ollama model; CI tests the harness guards but do not simulate a live model session.
 
 Prepare the checked-in fixture as a dedicated clean repository. For Docker Compose, run from the project root so it is mounted at `/workspace/live-e2e`:
 
@@ -301,11 +301,10 @@ export LAP_E2E_MODEL_ID='llama3.2:3b' # exact registered Ollama modelId
 export LAP_E2E_SERVER_REPOSITORY_PATH='/workspace/live-e2e'
 export LAP_E2E_LOCAL_REPOSITORY_PATH="$PWD/workspace/live-e2e"
 export LAP_E2E_CONFIRM_DISPOSABLE_REPOSITORY='I_CONFIRM_THIS_REPOSITORY_IS_DISPOSABLE'
-export LAP_E2E_ALLOW_BUILD_AND_TEST='I_APPROVE_BUILD_AND_TEST'
 node scripts/run-live-platform-e2e.js
 ```
 
-Remote platform URLs must use HTTPS; plain HTTP is limited to loopback. The harness refuses non-fixture contents, a dirty Git worktree, unexpected model-planned tools, other file writes, and any approval other than the platform's exact system-generated BuildTool/TestTool verification tasks. It removes its unique marker file only after a fully successful run; failures preserve workspace changes for inspection. The agent session/audit data and ignored `bin/`/`obj/` outputs remain. The harness safety/unit tests run in CI, but an actual live-platform run still requires an operator's reachable PostgreSQL/Ollama-backed instance and has not been verified in this environment.
+Remote platform URLs must use HTTPS; plain HTTP is limited to loopback. The harness refuses non-fixture contents, a dirty Git worktree, unexpected model-planned tools, and other file writes. It does not approve BuildTool/TestTool; if one reaches `AwaitingApproval`, it stops with exit code 2, leaves the task pending for a human decision, and preserves the marker for inspection. On a fully successful run, it removes the marker file; failures preserve workspace changes. Agent session/audit data and ignored `bin/`/`obj/` outputs remain. The harness safety/unit tests run in CI, but an actual live-platform/model run still requires an operator's reachable PostgreSQL/Ollama-backed instance and has not been performed here.
 
 ## Load/performance testing
 
