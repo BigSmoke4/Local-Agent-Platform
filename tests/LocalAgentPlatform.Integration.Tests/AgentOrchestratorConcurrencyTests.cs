@@ -130,7 +130,7 @@ public sealed class AgentOrchestratorConcurrencyTests
         try
         {
             await using var db = _fixture.CreateContext();
-            var (_, sessionId) = await AddSessionAsync(db, "AwaitingApproval", addTasks: false, repositoryPath: workspace);
+            var (_, sessionId) = await AddSessionAsync(db, "AwaitingApproval", addTasks: false, maxRetries: 0, repositoryPath: workspace);
             var repositoryId = await db.AgentSessions.Where(s => s.Id == sessionId)
                 .Select(s => s.RepositoryId).SingleAsync();
             var task = new AgentTaskNode
