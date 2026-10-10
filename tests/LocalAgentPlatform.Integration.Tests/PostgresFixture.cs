@@ -15,13 +15,13 @@ namespace LocalAgentPlatform.Integration.Tests;
 /// </summary>
 public sealed class PostgresFixture : IAsyncLifetime
 {
+    public string ConnectionString => Environment.GetEnvironmentVariable("ConnectionStrings__PlatformDb")
+        ?? "Host=localhost;Port=5432;Database=local_agent_platform_test;Username=postgres;Password=postgres";
+
     public PlatformDbContext CreateContext()
     {
-        var connectionString = Environment.GetEnvironmentVariable("ConnectionStrings__PlatformDb")
-            ?? "Host=localhost;Port=5432;Database=local_agent_platform_test;Username=postgres;Password=postgres";
-
         var options = new DbContextOptionsBuilder<PlatformDbContext>()
-            .UseNpgsql(connectionString)
+            .UseNpgsql(ConnectionString)
             .Options;
 
         return new PlatformDbContext(options);

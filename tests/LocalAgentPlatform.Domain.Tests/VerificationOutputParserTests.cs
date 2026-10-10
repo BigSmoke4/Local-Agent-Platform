@@ -68,5 +68,19 @@ public class TestOutputParserTests
         var result = TestOutputParser.Parse("some completely unrelated output with no summary line");
         Assert.False(result.Recognized);
         Assert.Null(result.Failed);
+        Assert.False(TestOutputParser.IndicatesVerifiedPass(result, processSucceeded: true));
+    }
+
+    [Fact]
+    public void Verified_pass_requires_successful_process_nonzero_tests_and_consistent_counts()
+    {
+        var successful = TestOutputParser.Parse("Passed! - Failed: 0, Passed: 3, Skipped: 1, Total: 4");
+        var empty = TestOutputParser.Parse("Passed! - Failed: 0, Passed: 0, Skipped: 0, Total: 0");
+        var inconsistent = TestOutputParser.Parse("Passed! - Failed: 0, Passed: 3, Skipped: 1, Total: 5");
+
+        Assert.True(TestOutputParser.IndicatesVerifiedPass(successful, processSucceeded: true));
+        Assert.False(TestOutputParser.IndicatesVerifiedPass(successful, processSucceeded: false));
+        Assert.False(TestOutputParser.IndicatesVerifiedPass(empty, processSucceeded: true));
+        Assert.False(TestOutputParser.IndicatesVerifiedPass(inconsistent, processSucceeded: true));
     }
 }

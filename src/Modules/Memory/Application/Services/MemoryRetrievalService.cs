@@ -27,10 +27,15 @@ public sealed class MemoryRetrievalService
     }
 
     public async Task<IReadOnlyList<RetrievedMemory>> RetrieveRelevantAsync(
-        Guid? repositoryId, string query, int maxEntries = 5, int maxTotalChars = 2500, CancellationToken ct = default, Guid? ownerUserId = null)
+        Guid ownerUserId, Guid? repositoryId, string query, int maxEntries = 5, int maxTotalChars = 2500, CancellationToken ct = default)
     {
+        maxEntries = Math.Clamp(maxEntries, 0, 20);
+        maxTotalChars = Math.Clamp(maxTotalChars, 0, 20_000);
+        if (maxEntries == 0 || maxTotalChars == 0) return Array.Empty<RetrievedMemory>();
         var candidates = await _db.MemoryEntries
-            .Where(m => (ownerUserId == null || m.OwnerUserId == ownerUserId) && (m.RepositoryId == repositoryId || m.RepositoryId == null))
+            .Where(m => m.OwnerUserId == ownerUserId && (m.RepositoryId == repositoryId || m.RepositoryId == null))
+            .OrderByDescending(m => m.LastAccessedAtUtc ?? m.CreatedAtUtc)
+            .Take(1_000)
             .ToListAsync(ct);
         if (candidates.Count == 0) return Array.Empty<RetrievedMemory>();
 
@@ -39,7 +44,9 @@ public sealed class MemoryRetrievalService
             .ToDictionary(x => x.Id, x => x.Score);
 
         float[]? queryVector = null;
-        try { queryVector = await _embeddings.EmbedAsync(query, ct: ct); } catch { /* local embedding model is optional at runtime */ }
+        try { queryVector = await _embeddings.EmbedAsync(query, ct: ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { /* local embedding model is optional at runtime */ }
 
         var ranked = candidates.Select(m =>
         {
@@ -53,11 +60,22 @@ public sealed class MemoryRetrievalService
         var usedChars = 0;
         foreach (var item in ranked)
         {
-            if (selected.Count >= maxEntries) break;
+            if (selected.Count >= maxEntries || usedChars >= maxTotalChars) break;
             var entry = item.Entry;
-            if (usedChars + entry.Content.Length > maxTotalChars && selected.Count > 0) continue;
-            selected.Add(new RetrievedMemory(entry.Id, entry.Scope, entry.Title, entry.Content, item.Score));
-            usedChars += entry.Content.Length;
+            var recordOverhead = entry.Scope.Length + entry.Title.Length + 8; // include prompt labels, not just body text
+            var contentBudget = maxTotalChars - usedChars - recordOverhead;
+            if (contentBudget <= 0) continue;
+
+            var content = entry.Content;
+            if (content.Length > contentBudget)
+            {
+                const string marker = "[truncated]";
+                content = contentBudget <= marker.Length
+                    ? content[..contentBudget]
+                    : content[..(contentBudget - marker.Length)] + marker;
+            }
+            selected.Add(new RetrievedMemory(entry.Id, entry.Scope, entry.Title, content, item.Score));
+            usedChars += recordOverhead + content.Length;
             entry.AccessCount++;
             entry.LastAccessedAtUtc = DateTimeOffset.UtcNow;
         }
@@ -80,6 +98,7 @@ public sealed class MemoryRetrievalService
                 entry.EmbeddingModelId = _embeddings.DefaultEmbeddingModelId;
                 updated++;
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch { break; }
         }
         if (updated > 0) await _db.SaveChangesAsync(ct);

@@ -8,6 +8,8 @@ using LocalAgentPlatform.Modules.Verification.Application.Services;
 using LocalAgentPlatform.Shared.Data;
 using LocalAgentPlatform.Shared.Data.Entities;
 using LocalAgentPlatform.Shared.Kernel.BackgroundWork;
+using LocalAgentPlatform.Shared.Kernel.Models;
+using LocalAgentPlatform.Shared.Kernel.Tools;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -15,12 +17,11 @@ namespace LocalAgentPlatform.Modules.Agent.Application.Services;
 
 /// <summary>
 /// The real agent execution loop (spec Section 8). Explicit states are persisted on
-/// AgentSession.State at every transition. This is intentionally a *linear* task chain
-/// (see docs/STATUS.md) — general branching task graphs are a documented follow-up, not
-/// a hidden simplification. Every tool call goes through the same
-/// <see cref="ToolExecutionService"/> the Tools console uses, so an agent-run tool
-/// invocation is indistinguishable in the audit trail from a human-run one — no
-/// separate, weaker code path for "the agent did it".
+/// AgentSession.State at every transition. Plans are validated as dependency DAGs and
+/// scheduled sequentially in deterministic topological order; parallel execution is
+/// deferred until resource locking exists. Every tool call goes through the same
+/// <see cref="ToolExecutionService"/> the Tools console uses, so agent-run invocations
+/// receive the same policy gates and audit trail as human-run ones.
 /// </summary>
 public sealed class AgentOrchestratorService
 {
@@ -64,24 +65,52 @@ public sealed class AgentOrchestratorService
 
     public async Task RunAsync(Guid sessionId, CancellationToken externalCt = default)
     {
-        var cts = _registry.Register(sessionId);
+        if (!_registry.TryRegister(sessionId, out var cts))
+        {
+            _logger.LogWarning("Ignoring duplicate delivery for agent session {SessionId}.", sessionId);
+            return;
+        }
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(externalCt, cts.Token);
         var ct = linkedCts.Token;
+        var ownsSessionClaim = false;
 
         try
         {
             var session = await _db.AgentSessions.FirstOrDefaultAsync(s => s.Id == sessionId, ct)
                 ?? throw new InvalidOperationException($"AgentSession {sessionId} not found.");
+            if (!string.Equals(session.State, "Created", StringComparison.Ordinal))
+            {
+                _logger.LogInformation("Ignoring duplicate or stale delivery for agent session {SessionId} in state {State}.", sessionId, session.State);
+                return;
+            }
+
+            // Claim the session with a conditional database update as well as the
+            // in-process registry. Duplicate queue deliveries on separate instances
+            // cannot both begin planning from the same Created state.
+            ct.ThrowIfCancellationRequested();
+            var claimed = await _db.AgentSessions
+                .Where(s => s.Id == sessionId && s.State == "Created")
+                // The short claim must return a definite row count; otherwise a canceled
+                // client call could commit the update but lose ownership of the run.
+                .ExecuteUpdateAsync(update => update.SetProperty(s => s.State, "Understanding"), CancellationToken.None);
+            if (claimed != 1)
+            {
+                _logger.LogInformation("Ignoring duplicate delivery for already-claimed agent session {SessionId}.", sessionId);
+                return;
+            }
+            ownsSessionClaim = true;
+            // The conditional update changed only this column; keep the already-loaded
+            // tracked entity in sync without a second read that could fail after claim.
+            session.State = "Understanding";
+            await _broadcaster.SessionUpdatedAsync(session.Id, session.State, ct);
 
             // ---- Understanding / Planning ----
-            await SetStateAsync(session, "Understanding", ct);
-
             await SetStateAsync(session, "Planning", ct);
             var tools = _toolExecutionService.AllTools;
 
             // Real retrieval-based memory (Section 14): pull relevant prior context for
             // this repository instead of injecting everything ever stored.
-            var relevantMemory = await _memoryRetrievalService.RetrieveRelevantAsync(session.RepositoryId, session.UserRequest, ct: ct, ownerUserId: session.OwnerUserId);
+            var relevantMemory = await _memoryRetrievalService.RetrieveRelevantAsync(session.OwnerUserId, session.RepositoryId, session.UserRequest, ct: ct);
             var memoryContext = MemoryRetrievalService.FormatForPrompt(relevantMemory);
             var repoContext = await _contextEngine.BuildContextAsync(session.RepositoryId, session.UserRequest, ct: ct);
             var codeContext = RepositoryContextEngine.FormatForPrompt(repoContext);
@@ -95,8 +124,8 @@ public sealed class AgentOrchestratorService
                 AgentSessionId = session.Id,
                 InputTokens = planningOutcome.ModelResult.InputTokens,
                 OutputTokens = planningOutcome.ModelResult.OutputTokens,
-                TokensPerSecond = planningOutcome.ModelResult.Duration.TotalSeconds > 0
-                    ? planningOutcome.ModelResult.OutputTokens / planningOutcome.ModelResult.Duration.TotalSeconds
+                TokensPerSecond = planningOutcome.ModelResult.GenerationDuration is TimeSpan generationDuration && generationDuration.TotalSeconds > 0
+                    ? planningOutcome.ModelResult.OutputTokens / generationDuration.TotalSeconds
                     : 0,
                 TimeToFirstToken = planningOutcome.ModelResult.TimeToFirstToken
             });
@@ -121,17 +150,20 @@ public sealed class AgentOrchestratorService
                 return;
             }
 
-            await RunVerificationAsync(session, ct);
+            var verificationStop = await RunVerificationAsync(session, ct);
+            if (verificationStop == "AwaitingApproval") await SetStateAsync(session, "AwaitingApproval", ct);
+            else if (verificationStop is not null) await FailAsync(session, verificationStop, ct);
         }
         catch (OperationCanceledException)
         {
             var session = await _db.AgentSessions.FirstOrDefaultAsync(s => s.Id == sessionId, CancellationToken.None);
-            if (session is not null)
+            if (ownsSessionClaim && session is not null && session.State is not ("Completed" or "Failed" or "Cancelled"))
             {
                 session.State = "Cancelled";
                 session.CompletedAtUtc = DateTimeOffset.UtcNow;
                 session.FinalSummary = "Cancelled by user request.";
                 await _db.SaveChangesAsync(CancellationToken.None);
+                await MarkTasksAfterCancellationAsync(sessionId, CancellationToken.None);
                 await _broadcaster.SessionUpdatedAsync(session.Id, session.State, CancellationToken.None);
                 await _memoryWriteService.RecordSessionOutcomeAsync(session, CancellationToken.None);
             }
@@ -140,13 +172,41 @@ public sealed class AgentOrchestratorService
         {
             _logger.LogError(ex, "Agent session {SessionId} failed with an unhandled exception.", sessionId);
             var session = await _db.AgentSessions.FirstOrDefaultAsync(s => s.Id == sessionId, CancellationToken.None);
-            if (session is not null)
+            if (ownsSessionClaim && session is not null && session.State is not ("Completed" or "Failed" or "Cancelled"))
                 await FailAsync(session, $"Unhandled exception: {ex.Message}", CancellationToken.None);
         }
         finally
         {
             _registry.Unregister(sessionId);
         }
+    }
+
+    /// <summary>Atomically cancels a session that has not been claimed by a live run
+    /// (queued or waiting for human approval). Active runs use the in-memory token
+    /// registry so their current model/process call is interrupted promptly.</summary>
+    public async Task<bool> CancelPendingAsync(Guid sessionId, Guid ownerUserId)
+    {
+        // Cancellation is the user's requested domain operation; don't let a browser
+        // disconnect abort the atomic transition or its audit/memory side effects.
+        var now = DateTimeOffset.UtcNow;
+        var changed = await _db.AgentSessions
+            .Where(s => s.Id == sessionId && s.OwnerUserId == ownerUserId &&
+                        (s.State == "Created" || s.State == "AwaitingApproval"))
+            .ExecuteUpdateAsync(update => update
+                .SetProperty(s => s.State, "Cancelled")
+                .SetProperty(s => s.CompletedAtUtc, now)
+                .SetProperty(s => s.FinalSummary, "Cancelled before execution started."), CancellationToken.None);
+        if (changed != 1) return false;
+
+        // Once the conditional update commits, finish the audit/memory side effects even
+        // if the requesting browser disconnects.
+        var session = await _db.AgentSessions.FirstOrDefaultAsync(
+            s => s.Id == sessionId && s.OwnerUserId == ownerUserId, CancellationToken.None);
+        if (session is null) return false;
+        await MarkTasksAfterCancellationAsync(sessionId, CancellationToken.None);
+        await _broadcaster.SessionUpdatedAsync(session.Id, session.State, CancellationToken.None);
+        await _memoryWriteService.RecordSessionOutcomeAsync(session, CancellationToken.None);
+        return true;
     }
 
     /// <summary>Resumes a session sitting in AwaitingApproval: approves exactly the
@@ -158,10 +218,31 @@ public sealed class AgentOrchestratorService
     {
         var session = await _db.AgentSessions.FirstOrDefaultAsync(s => s.Id == sessionId, externalCt)
             ?? throw new InvalidOperationException($"AgentSession {sessionId} not found.");
-        var task = await _db.AgentTaskNodes.FirstOrDefaultAsync(t => t.Id == taskId, externalCt)
-            ?? throw new InvalidOperationException($"AgentTaskNode {taskId} not found.");
+        if (!string.Equals(session.State, "AwaitingApproval", StringComparison.Ordinal))
+            throw new InvalidOperationException("Agent session is not awaiting approval.");
+        var task = await _db.AgentTaskNodes.FirstOrDefaultAsync(
+                t => t.Id == taskId && t.AgentSessionId == sessionId && t.Status == "AwaitingApproval", externalCt)
+            ?? throw new InvalidOperationException("Pending approval task was not found for this session.");
 
-        var cts = _registry.Register(sessionId);
+        if (!_registry.TryRegister(sessionId, out var cts))
+            throw new InvalidOperationException($"Agent session {sessionId} is already running.");
+        try
+        {
+            externalCt.ThrowIfCancellationRequested();
+            var claimed = await _db.AgentSessions
+                .Where(s => s.Id == sessionId && s.State == "AwaitingApproval")
+                .ExecuteUpdateAsync(update => update.SetProperty(s => s.State, "Executing"), CancellationToken.None);
+            if (claimed != 1)
+                throw new InvalidOperationException("Agent session approval was already claimed or is no longer pending.");
+            // The conditional update changed only State. Synchronize the tracked entity
+            // locally so no follow-up database read can fail after we own the claim.
+            session.State = "Executing";
+        }
+        catch
+        {
+            _registry.Unregister(sessionId);
+            throw;
+        }
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(externalCt, cts.Token);
         var ct = linkedCts.Token;
 
@@ -189,7 +270,28 @@ public sealed class AgentOrchestratorService
                 return;
             }
 
-            await RunVerificationAsync(session, ct);
+            var verificationStop = await RunVerificationAsync(session, ct);
+            if (verificationStop == "AwaitingApproval") await SetStateAsync(session, "AwaitingApproval", ct);
+            else if (verificationStop is not null) await FailAsync(session, verificationStop, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            if (session.State is not ("Completed" or "Failed" or "Cancelled"))
+            {
+                session.State = "Cancelled";
+                session.CompletedAtUtc = DateTimeOffset.UtcNow;
+                session.FinalSummary = "Cancelled by user request.";
+                await _db.SaveChangesAsync(CancellationToken.None);
+                await MarkTasksAfterCancellationAsync(sessionId, CancellationToken.None);
+                await _broadcaster.SessionUpdatedAsync(session.Id, session.State, CancellationToken.None);
+                await _memoryWriteService.RecordSessionOutcomeAsync(session, CancellationToken.None);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Agent session {SessionId} failed while resuming after approval.", sessionId);
+            if (session.State is not ("Completed" or "Failed" or "Cancelled"))
+                await FailAsync(session, $"Unhandled exception while resuming: {ex.Message}", CancellationToken.None);
         }
         finally
         {
@@ -199,26 +301,36 @@ public sealed class AgentOrchestratorService
 
     private async Task<string?> ExecutePlanGraphAsync(AgentSession session, AgentPlan plan, Guid? approvedTaskId, CancellationToken ct)
     {
-        var tasks = await _db.AgentTaskNodes.Where(t => t.AgentSessionId == session.Id).ToListAsync(ct);
-        var byStep = tasks.Where(t => !string.IsNullOrWhiteSpace(t.StepKey)).ToDictionary(t => t.StepKey, StringComparer.OrdinalIgnoreCase);
+        var orderedSteps = AgentPlanGraph.TryTopologicalOrder(plan.Steps);
+        if (orderedSteps is null) return "Plan graph is invalid: dependencies are missing, duplicated, or cyclic.";
 
-        for (var i = 0; i < plan.Steps.Count; i++)
+        var tasks = await _db.AgentTaskNodes.Where(t => t.AgentSessionId == session.Id).ToListAsync(ct);
+        var byStep = tasks.Where(t => !string.IsNullOrWhiteSpace(t.StepKey))
+            .ToDictionary(t => t.StepKey, StringComparer.OrdinalIgnoreCase);
+        var nextOrder = tasks.Count == 0 ? 0 : tasks.Max(t => t.OrderIndex) + 1;
+
+        for (var i = 0; i < orderedSteps.Count; i++)
         {
-            var step = plan.Steps[i];
+            var step = orderedSteps[i];
             if (byStep.ContainsKey(step.Id)) continue;
             var deps = step.DependsOn ?? Array.Empty<string>();
             var task = new AgentTaskNode
             {
-                AgentSessionId = session.Id, OrderIndex = i, StepKey = step.Id,
-                DependenciesJson = JsonSerializer.Serialize(deps), Type = step.Type, Description = step.Description,
-                ToolName = step.ToolName, ArgumentsJson = step.Arguments is null ? null : JsonSerializer.Serialize(step.Arguments)
+                AgentSessionId = session.Id,
+                OrderIndex = nextOrder + i,
+                StepKey = step.Id,
+                DependenciesJson = JsonSerializer.Serialize(deps),
+                Type = step.Type,
+                Description = step.Description,
+                ToolName = step.ToolName,
+                ArgumentsJson = step.Arguments is null ? null : JsonSerializer.Serialize(step.Arguments)
             };
             _db.AgentTaskNodes.Add(task);
             byStep[step.Id] = task;
         }
         await _db.SaveChangesAsync(ct);
 
-        foreach (var step in plan.Steps)
+        foreach (var step in orderedSteps)
         {
             var task = byStep[step.Id];
             if (task.Status == "Completed") continue;
@@ -228,7 +340,10 @@ public sealed class AgentOrchestratorService
             {
                 task.Status = "Skipped";
                 task.Error = $"Dependency '{failedDependency}' did not complete successfully.";
-                continue;
+                task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
+                return $"Plan step '{step.Id}' cannot run because dependency '{failedDependency}' failed.";
             }
             if (deps.Any(d => byStep[d].Status != "Completed"))
                 return $"Plan graph stalled before '{step.Id}': one or more dependencies are incomplete.";
@@ -248,11 +363,13 @@ public sealed class AgentOrchestratorService
     {
         await SetStateAsync(session, "Executing", ct);
         task.Status = "Executing";
+        task.Error = null;
         task.StartedAtUtc ??= DateTimeOffset.UtcNow;
+        await _db.SaveChangesAsync(ct);
+        await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
 
         while (true)
         {
-            session.IterationCount++;
             var budget = AgentBudgetPolicy.Check(
                 session.IterationCount, session.MaxIterations,
                 task.RetryCount, session.MaxRetries,
@@ -263,14 +380,22 @@ public sealed class AgentOrchestratorService
                 task.Status = "Failed";
                 task.Error = budget.StopReason;
                 task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
                 return budget.StopReason;
             }
+
+            // Count only attempts that actually proceed past the budget gate. This
+            // permits exactly MaxIterations tool/reasoning attempts rather than one fewer.
+            session.IterationCount++;
 
             if (task.Type == "Reasoning")
             {
                 task.Status = "Completed";
                 task.Output = task.Description;
                 task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
                 return null;
             }
 
@@ -279,23 +404,47 @@ public sealed class AgentOrchestratorService
                 task.Status = "Failed";
                 task.Error = "Plan step marked as ToolCall but named no tool.";
                 task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
                 return task.Error;
             }
 
-            var arguments = string.IsNullOrEmpty(task.ArgumentsJson)
-                ? new Dictionary<string, string>()
-                : JsonSerializer.Deserialize<Dictionary<string, string>>(task.ArgumentsJson)!;
+            Dictionary<string, string> arguments;
+            try
+            {
+                arguments = string.IsNullOrEmpty(task.ArgumentsJson)
+                    ? new Dictionary<string, string>()
+                    : JsonSerializer.Deserialize<Dictionary<string, string>>(task.ArgumentsJson)
+                      ?? throw new JsonException("Tool arguments were null.");
+            }
+            catch (Exception ex) when (ex is JsonException or ArgumentException or NotSupportedException)
+            {
+                task.Status = "Failed";
+                task.Error = $"Invalid persisted tool arguments: {ex.Message}";
+                task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
+                return task.Error;
+            }
+
+            // Persisted task arguments are untrusted metadata, even if they were valid
+            // when originally planned. Never pass null/blank paths onward to file tools.
+            foreach (var key in arguments.Keys.Where(k => k.Equals("path", StringComparison.OrdinalIgnoreCase)).ToArray())
+                if (string.IsNullOrWhiteSpace(arguments[key])) arguments.Remove(key);
 
             ToolInvocationOutcome outcome;
             try
             {
-                outcome = await _toolExecutionService.InvokeAsync(task.ToolName, session.RepositoryId, arguments, approved, ct, session.OwnerUserId);
+                outcome = await _toolExecutionService.InvokeAsync(
+                    task.ToolName, session.RepositoryId, arguments, approved, ct, session.OwnerUserId);
             }
             catch (InvalidOperationException ex)
             {
                 task.Status = "Failed";
                 task.Error = ex.Message;
                 task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
                 return ex.Message;
             }
 
@@ -304,6 +453,8 @@ public sealed class AgentOrchestratorService
                 task.Status = "Failed";
                 task.Error = $"Denied by command policy: {outcome.DecisionReason}";
                 task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
                 return task.Error;
             }
 
@@ -311,30 +462,54 @@ public sealed class AgentOrchestratorService
             {
                 task.Status = "AwaitingApproval";
                 task.Error = outcome.DecisionReason;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
                 return "AwaitingApproval";
             }
 
-            // Allowed and executed.
+            // Verification tasks record the actual compiler/test result as a completed
+            // action even when the process exits non-zero. The verification pipeline—not
+            // the generic tool retry handler—decides whether a failed build/test is a
+            // repairable verification failure.
+            if (string.Equals(task.Type, "Verification", StringComparison.Ordinal))
+            {
+                task.Status = "Completed";
+                task.Output = outcome.Result?.Output ?? string.Empty;
+                task.Error = outcome.Result?.Success == true ? null : outcome.Result?.Error ?? "Tool returned no result.";
+                task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
+                return null;
+            }
+
             if (outcome.Result is { Success: true })
             {
                 task.Status = "Completed";
                 task.Output = outcome.Result.Output;
+                task.Error = null;
                 task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
                 return null;
             }
 
-            // Tool ran but failed — retry within budget.
             task.RetryCount++;
             task.Error = outcome.Result?.Error ?? "Tool returned failure with no error message.";
-            approved = true; // once approved for one attempt, retries of the same already-cleared command don't need re-approval
-
+            // One-time approval is consumed by the invocation above. A retry that would
+            // execute a high-risk tool or command must return to the approval gate.
+            approved = false;
             if (task.RetryCount > session.MaxRetries)
             {
                 task.Status = "Failed";
                 task.CompletedAtUtc = DateTimeOffset.UtcNow;
+                await _db.SaveChangesAsync(ct);
+                await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
                 return $"Task '{task.Description}' failed after {task.RetryCount} attempts: {task.Error}";
             }
-            // loop and retry
+
+            task.Status = "Executing";
+            await _db.SaveChangesAsync(ct);
+            await _broadcaster.TaskUpdatedAsync(session.Id, task.Id, task.Status, ct);
         }
     }
 
@@ -347,124 +522,156 @@ public sealed class AgentOrchestratorService
     /// session ends Failed with the real, last verification result attached. Success is
     /// only ever reported when the deterministic pipeline actually passed.
     /// </summary>
-    private async Task RunVerificationAsync(AgentSession session, CancellationToken ct)
+    private async Task<string?> RunVerificationAsync(AgentSession session, CancellationToken ct)
     {
         var tasks = await _db.AgentTaskNodes
             .Where(t => t.AgentSessionId == session.Id)
             .OrderBy(t => t.OrderIndex)
             .ToListAsync(ct);
 
-        var touchedFiles = tasks.Any(t =>
-            t.Status == "Completed" &&
-            (t.ToolName == "FileWriteTool" || t.ToolName == "FileEditTool"));
-
-        if (!touchedFiles)
-        {
-            // Nothing to verify — a pure read/reasoning plan has no build/test surface.
-            await CompleteAsync(session, tasks, verification: null, review: null, ct);
-            return;
-        }
-
         while (true)
         {
             await SetStateAsync(session, "Verifying", ct);
-            var runTests = session.RepairAttemptCount == 0 || tasks.Any(t => t.ToolName == "TestTool");
-            var verification = await _verificationPipeline.RunAsync(session.Id, session.RepositoryId, session.RepairAttemptCount, runTests, ct);
+            var attempt = session.RepairAttemptCount;
+
+            // Builds and tests execute repository-controlled MSBuild/test code. They are
+            // high-risk tools, so verification obtains an explicit one-time approval and
+            // passes only that actual result into the verifier.
+            var buildGate = await EnsureVerificationToolAsync(session, "BuildTool", attempt, ct);
+            if (buildGate.StopReason is not null) return buildGate.StopReason;
+            var buildResult = ToVerificationResult(buildGate.Task!);
+
+            var runTests = true;
+            ToolExecutionResult? testResult = null;
+            if (buildResult.Success && runTests)
+            {
+                var testGate = await EnsureVerificationToolAsync(session, "TestTool", attempt, ct);
+                if (testGate.StopReason is not null) return testGate.StopReason;
+                testResult = ToVerificationResult(testGate.Task!);
+            }
+
+            var verification = await _verificationPipeline.RunAsync(
+                session.Id, session.RepositoryId, attempt, runTests, buildResult, testResult, ct);
 
             var review = await _reviewerService.ReviewAsync(session.ModelIdUsed!, session.UserRequest, verification, ct);
             verification.ReviewerVerdict = review.Verdict;
             verification.ReviewerReason = review.Reason;
             await _db.SaveChangesAsync(ct);
+            tasks = await _db.AgentTaskNodes
+                .Where(t => t.AgentSessionId == session.Id)
+                .OrderBy(t => t.OrderIndex)
+                .ToListAsync(ct);
 
             var passed = verification.OverallResult == "Passed" && review.Verdict != "Rejected";
             if (passed)
             {
                 await CompleteAsync(session, tasks, verification, review, ct);
-                return;
+                return null;
             }
 
             if (session.RepairAttemptCount >= session.MaxRepairAttempts)
             {
-                session.State = "Failed";
-                session.FailureReason = BuildFailureReason(verification, review);
-                session.CompletedAtUtc = DateTimeOffset.UtcNow;
-                session.FinalSummary = BuildFinalSummary(session, tasks, verification, review);
-                await _db.SaveChangesAsync(ct);
-                await _broadcaster.SessionUpdatedAsync(session.Id, session.State, ct);
-                await _memoryWriteService.RecordSessionOutcomeAsync(session, ct);
-                return;
+                var reason = BuildFailureReason(verification, review);
+                var summary = BuildFinalSummary(session, tasks, verification, review);
+                await FailAsync(session, reason, ct, summary);
+                return null;
             }
 
-            // ---- Repairing: real re-plan using the actual failure as context ----
             session.RepairAttemptCount++;
             await SetStateAsync(session, "Repairing", ct);
-
             var repairRequest =
                 $"The previous attempt at this request failed verification. Original request: {session.UserRequest}\n" +
                 $"Verification result: {BuildFailureReason(verification, review)}\n" +
                 "Produce a short plan of additional steps to fix this.";
 
-            var repairPlanning = await _planningService.CreatePlanAsync(session.ModelIdUsed!, repairRequest, _toolExecutionService.AllTools, ct);
-            _db.TokenUsageRecords.Add(new TokenUsageRecord
-            {
-                AgentSessionId = session.Id,
-                InputTokens = repairPlanning.ModelResult.InputTokens,
-                OutputTokens = repairPlanning.ModelResult.OutputTokens,
-                TokensPerSecond = repairPlanning.ModelResult.Duration.TotalSeconds > 0
-                    ? repairPlanning.ModelResult.OutputTokens / repairPlanning.ModelResult.Duration.TotalSeconds : 0,
-                TimeToFirstToken = repairPlanning.ModelResult.TimeToFirstToken
-            });
-            await _db.SaveChangesAsync(ct);
+            var repairPlanning = await _planningService.CreatePlanAsync(
+                session.ModelIdUsed!, repairRequest, _toolExecutionService.AllTools, ct);
+            await RecordTokenUsageAsync(session, repairPlanning.ModelResult, ct);
 
             if (repairPlanning.Plan is null)
             {
-                session.State = "Failed";
-                session.FailureReason = $"Repair planning failed: {repairPlanning.ParseError}";
-                session.CompletedAtUtc = DateTimeOffset.UtcNow;
-                session.FinalSummary = BuildFinalSummary(session, tasks, verification, review);
-                await _db.SaveChangesAsync(ct);
-                await _broadcaster.SessionUpdatedAsync(session.Id, session.State, ct);
-                await _memoryWriteService.RecordSessionOutcomeAsync(session, ct);
-                return;
+                var reason = $"Repair planning failed: {repairPlanning.ParseError}";
+                var summary = BuildFinalSummary(session, tasks, verification, review);
+                await FailAsync(session, reason, ct, summary);
+                return null;
             }
 
-            var baseIndex = tasks.Count;
-            Guid? previousTaskId = tasks.LastOrDefault()?.Id;
-            for (var i = 0; i < repairPlanning.Plan.Steps.Count; i++)
-            {
-                var step = repairPlanning.Plan.Steps[i];
-                var repairTask = new AgentTaskNode
-                {
-                    AgentSessionId = session.Id,
-                    OrderIndex = baseIndex + i,
-                    ParentId = previousTaskId,
-                    Type = step.Type,
-                    Description = $"[repair #{session.RepairAttemptCount}] {step.Description}",
-                    ToolName = step.ToolName,
-                    ArgumentsJson = step.Arguments is not null ? JsonSerializer.Serialize(step.Arguments) : null
-                };
-                _db.AgentTaskNodes.Add(repairTask);
+            // Persist the current repair plan before execution. If approval is requested,
+            // resume uses these stable IDs rather than replaying the original plan.
+            var repairPlan = PrefixPlan(repairPlanning.Plan, $"repair-{session.RepairAttemptCount}-");
+            session.PlanJson = JsonSerializer.Serialize(repairPlan, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            await _db.SaveChangesAsync(ct);
+            var stopReason = await ExecutePlanGraphAsync(session, repairPlan, approvedTaskId: null, ct);
+            if (stopReason is not null) return stopReason;
 
-                var stopped = await RunTaskWithRetriesAsync(session, repairTask, approved: false, ct);
-                await _db.SaveChangesAsync(ct);
-                tasks.Add(repairTask);
-
-                if (stopped is not null)
-                {
-                    if (stopped == "AwaitingApproval") { await SetStateAsync(session, "AwaitingApproval", ct); return; }
-                    session.State = "Failed";
-                    session.FailureReason = stopped;
-                    session.CompletedAtUtc = DateTimeOffset.UtcNow;
-                    session.FinalSummary = BuildFinalSummary(session, tasks, verification, review);
-                    await _db.SaveChangesAsync(ct);
-                    await _broadcaster.SessionUpdatedAsync(session.Id, session.State, ct);
-                    await _memoryWriteService.RecordSessionOutcomeAsync(session, ct);
-                    return;
-                }
-                previousTaskId = repairTask.Id;
-            }
-            // loop back and re-verify
+            tasks = await _db.AgentTaskNodes
+                .Where(t => t.AgentSessionId == session.Id)
+                .OrderBy(t => t.OrderIndex)
+                .ToListAsync(ct);
         }
+    }
+
+    private async Task<(AgentTaskNode? Task, string? StopReason)> EnsureVerificationToolAsync(
+        AgentSession session, string toolName, int attempt, CancellationToken ct)
+    {
+        var stepKey = $"__system_verification_{attempt}_{toolName}";
+        var task = await _db.AgentTaskNodes.FirstOrDefaultAsync(
+            t => t.AgentSessionId == session.Id && t.StepKey == stepKey, ct);
+        if (task is null)
+        {
+            var nextOrder = await _db.AgentTaskNodes.Where(t => t.AgentSessionId == session.Id)
+                .Select(t => (int?)t.OrderIndex).MaxAsync(ct) ?? -1;
+            task = new AgentTaskNode
+            {
+                AgentSessionId = session.Id,
+                OrderIndex = nextOrder + 1,
+                StepKey = stepKey,
+                Type = "Verification",
+                Description = toolName == "BuildTool"
+                    ? "Run an approved workspace build for verification. Build targets can execute repository code."
+                    : "Run approved workspace tests for verification. Tests execute repository code.",
+                ToolName = toolName,
+                ArgumentsJson = "{}",
+                DependenciesJson = "[]"
+            };
+            _db.AgentTaskNodes.Add(task);
+            await _db.SaveChangesAsync(ct);
+        }
+
+        if (task.Status == "Completed") return (task, null);
+        if (task.Status == "Failed") return (null, task.Error ?? $"{toolName} verification command failed to execute.");
+
+        var stopReason = await RunTaskWithRetriesAsync(session, task, approved: false, ct);
+        await _db.SaveChangesAsync(ct);
+        return stopReason is null ? (task, null) : (null, stopReason);
+    }
+
+    private static ToolExecutionResult ToVerificationResult(AgentTaskNode task) =>
+        new(task.Error is null, task.Output ?? string.Empty, task.Error);
+
+    private async Task RecordTokenUsageAsync(AgentSession session, ModelGenerationResult result, CancellationToken ct)
+    {
+        _db.TokenUsageRecords.Add(new TokenUsageRecord
+        {
+            AgentSessionId = session.Id,
+            InputTokens = result.InputTokens,
+            OutputTokens = result.OutputTokens,
+            TokensPerSecond = result.GenerationDuration is TimeSpan generationDuration && generationDuration.TotalSeconds > 0
+                ? result.OutputTokens / generationDuration.TotalSeconds
+                : 0,
+            TimeToFirstToken = result.TimeToFirstToken
+        });
+        await _db.SaveChangesAsync(ct);
+    }
+
+    private static AgentPlan PrefixPlan(AgentPlan plan, string prefix)
+    {
+        var ids = plan.Steps.ToDictionary(s => s.Id, s => prefix + s.Id, StringComparer.OrdinalIgnoreCase);
+        return new AgentPlan(plan.Steps.Select(s => s with
+        {
+            Id = ids[s.Id],
+            DependsOn = (s.DependsOn ?? Array.Empty<string>()).Select(d => ids[d]).ToArray()
+        }).ToList());
     }
 
     private static string BuildFailureReason(VerificationRun v, ReviewOutcome review)
@@ -475,6 +682,64 @@ public sealed class AgentOrchestratorService
         if (v.SecurityFindingCount > 0) parts.Add($"{v.SecurityFindingCount} security finding(s)");
         if (review.Verdict == "Rejected") parts.Add($"reviewer rejected: {review.Reason}");
         return parts.Count > 0 ? string.Join("; ", parts) : "verification failed for an unspecified reason";
+    }
+
+    private async Task MarkTasksAfterCancellationAsync(Guid sessionId, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var executing = await _db.AgentTaskNodes
+            .Where(t => t.AgentSessionId == sessionId && t.Status == "Executing")
+            .ToListAsync(ct);
+        foreach (var task in executing)
+        {
+            task.Status = "Cancelled";
+            task.Error = "Task was cancelled with its agent session.";
+            task.CompletedAtUtc = now;
+        }
+
+        var pending = await _db.AgentTaskNodes
+            .Where(t => t.AgentSessionId == sessionId && (t.Status == "Pending" || t.Status == "AwaitingApproval"))
+            .ToListAsync(ct);
+        foreach (var task in pending)
+        {
+            task.Status = "Skipped";
+            task.Error = "Task was skipped because the agent session was cancelled.";
+            task.CompletedAtUtc = now;
+        }
+
+        if (executing.Count + pending.Count == 0) return;
+        await _db.SaveChangesAsync(ct);
+        foreach (var task in executing.Concat(pending))
+            await _broadcaster.TaskUpdatedAsync(sessionId, task.Id, task.Status, ct);
+    }
+
+    private async Task MarkTasksAfterFailureAsync(Guid sessionId, string reason, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var executing = await _db.AgentTaskNodes
+            .Where(t => t.AgentSessionId == sessionId && t.Status == "Executing")
+            .ToListAsync(ct);
+        foreach (var task in executing)
+        {
+            task.Status = "Failed";
+            task.Error = reason.Length > 2_000 ? reason[..2_000] + "... [truncated]" : reason;
+            task.CompletedAtUtc = now;
+        }
+
+        var pending = await _db.AgentTaskNodes
+            .Where(t => t.AgentSessionId == sessionId && (t.Status == "Pending" || t.Status == "AwaitingApproval"))
+            .ToListAsync(ct);
+        foreach (var task in pending)
+        {
+            task.Status = "Skipped";
+            task.Error = "Task was skipped because the agent session failed.";
+            task.CompletedAtUtc = now;
+        }
+
+        if (executing.Count + pending.Count == 0) return;
+        await _db.SaveChangesAsync(ct);
+        foreach (var task in executing.Concat(pending))
+            await _broadcaster.TaskUpdatedAsync(sessionId, task.Id, task.Status, ct);
     }
 
     private async Task CompleteAsync(AgentSession session, List<AgentTaskNode> tasks, VerificationRun? verification, ReviewOutcome? review, CancellationToken ct)
@@ -511,14 +776,20 @@ public sealed class AgentOrchestratorService
         return sb.ToString();
     }
 
-    private async Task FailAsync(AgentSession session, string reason, CancellationToken ct)
+    private async Task FailAsync(AgentSession session, string reason, CancellationToken ct, string? finalSummary = null)
     {
         session.State = "Failed";
         session.FailureReason = reason;
+        if (finalSummary is not null) session.FinalSummary = finalSummary;
         session.CompletedAtUtc = DateTimeOffset.UtcNow;
         await _db.SaveChangesAsync(ct);
-        await _broadcaster.SessionUpdatedAsync(session.Id, session.State, ct);
-        await _memoryWriteService.RecordSessionOutcomeAsync(session, ct);
+
+        // The terminal session transition is committed. Finish task cleanup and audit
+        // side effects even if the originating queue/request token is shutting down.
+        try { await MarkTasksAfterFailureAsync(session.Id, reason, CancellationToken.None); }
+        catch (Exception ex) { _logger.LogError(ex, "Could not finalize task statuses for failed agent session {SessionId}.", session.Id); }
+        await _broadcaster.SessionUpdatedAsync(session.Id, session.State, CancellationToken.None);
+        await _memoryWriteService.RecordSessionOutcomeAsync(session, CancellationToken.None);
     }
 
     private async Task SetStateAsync(AgentSession session, string state, CancellationToken ct)

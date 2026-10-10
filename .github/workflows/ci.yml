@@ -7,8 +7,30 @@ on:
     branches: [main]
 
 jobs:
+  vscode-extension-host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install VS Code extension test dependencies
+        run: npm ci --prefix integrations/vscode
+
+      - name: VS Code API client tests
+        run: npm --prefix integrations/vscode test
+
+      - name: Live-platform E2E harness safety tests
+        run: node --test tests/live-platform-e2e.test.js
+
+      - name: VS Code Extension Host tests
+        run: xvfb-run -a npm --prefix integrations/vscode run test:extension-host
+
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     services:
       postgres:
@@ -26,18 +48,47 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "8.0.x"
 
       - name: Restore
         run: dotnet restore src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
 
+      - name: Require committed EF migration
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          migration_dir = Path('src/Shared/Data/Migrations')
+          migrations = [path for path in migration_dir.glob('*.cs') if re.match(r'^\d{14}_.+\.cs$', path.name)]
+          if not migrations:
+              raise SystemExit('No committed EF migration found; create and commit the baseline migration.')
+          PY
+
       - name: Build
         run: dotnet build src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj --no-restore -c Release
+
+      - name: Verify disposable live-E2E fixture build and test
+        run: dotnet test tests/fixtures/live-platform-e2e/Disposable.csproj -c Release
+
+      - name: Validate migration snapshot and apply to fresh PostgreSQL
+        env:
+          ConnectionStrings__PlatformDb: "Host=localhost;Port=5432;Database=local_agent_platform_test;Username=postgres;Password=postgres"
+        run: |
+          dotnet tool restore
+          dotnet ef migrations has-pending-model-changes \
+            --context PlatformDbContext \
+            --project src/Shared/Data/Shared.Data.csproj \
+            --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
+          dotnet ef database update \
+            --context PlatformDbContext \
+            --project src/Shared/Data/Shared.Data.csproj \
+            --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
 
       - name: Unit tests (pure Domain logic, no DB/network)
         run: dotnet test tests/LocalAgentPlatform.Domain.Tests/LocalAgentPlatform.Domain.Tests.csproj -c Release --logger "trx;LogFileName=domain-tests.trx"
@@ -45,19 +96,225 @@ jobs:
       - name: Integration tests (real Postgres via the service container above)
         env:
           ConnectionStrings__PlatformDb: "Host=localhost;Port=5432;Database=local_agent_platform_test;Username=postgres;Password=postgres"
-        run: dotnet test tests/LocalAgentPlatform.Integration.Tests/LocalAgentPlatform.Integration.Tests.csproj -c Release --logger "trx;LogFileName=integration-tests.trx"
+        run: |
+          set +e
+          dotnet test tests/LocalAgentPlatform.Integration.Tests/LocalAgentPlatform.Integration.Tests.csproj -c Release --logger "trx;LogFileName=integration-tests.trx"
+          test_exit=$?
+          set -e
+          if [ "$test_exit" -ne 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          def escape(value):
+              return value.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+
+          result_files = list(Path('tests/LocalAgentPlatform.Integration.Tests').rglob('integration-tests.trx'))
+          failures = []
+          for result_file in result_files:
+              root = ET.parse(result_file).getroot()
+              for result in root.iter():
+                  if not result.tag.endswith('UnitTestResult') or result.attrib.get('outcome') not in {'Failed', 'Error', 'Timeout', 'Aborted'}:
+                      continue
+                  test_name = result.attrib.get('testName', 'Unknown integration test')
+                  message = ''
+                  for node in result.iter():
+                      if node.tag.endswith('Message') and node.text:
+                          message = node.text.strip()
+                          break
+                  failures.append((test_name, message))
+
+          if not failures:
+              print('::error title=Integration test failure::dotnet test failed; no failed test cases were found in TRX output.')
+          for test_name, message in failures:
+              print(f'::error title=Integration test failed::{escape(test_name + ": " + message[:1200])}')
+          PY
+          fi
+          exit "$test_exit"
+
+      - name: Install PostgreSQL client for adoption cutover verification
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client
+
+      - name: Verify safe adoption of a pre-migration EnsureCreated database
+        env:
+          PGPASSWORD: postgres
+          LAP_ADOPTION_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/lap_ensurecreated_adoption_test
+          LAP_ADOPTION_ADMIN_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          LAP_ADOPTION_CONFIRM_TARGET_DATABASE: lap_ensurecreated_adoption_test
+          LAP_ADOPTION_CONFIRM_WRITERS_STOPPED: I_STOPPED_ALL_WRITERS
+          LAP_ADOPTION_DIAGNOSTICS: "1"
+        run: |
+          set -euo pipefail
+          fail_ci() {
+            printf '::error title=EnsureCreated adoption CI fixture failed::%s\n' "$1"
+            exit 1
+          }
+          admin_url='postgresql://postgres:postgres@localhost:5432/postgres'
+          psql --no-psqlrc --set=ON_ERROR_STOP=1 "$admin_url" \
+            --command='CREATE DATABASE lap_ensurecreated_adoption_test TEMPLATE template0'
+          ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=lap_ensurecreated_adoption_test;Username=postgres;Password=postgres' \
+            LAP_RUN_ENSURECREATED_ADOPTION_FIXTURE=1 \
+            dotnet test tests/LocalAgentPlatform.Integration.Tests/LocalAgentPlatform.Integration.Tests.csproj \
+              -c Release --filter FullyQualifiedName~EnsureCreatedAdoptionFixtureTests
+
+          target_url="$LAP_ADOPTION_DATABASE_URL"
+          psql --no-psqlrc --set=ON_ERROR_STOP=1 "$target_url" \
+            --command='CREATE TABLE public."UnexpectedLegacyTable" ("Id" integer NOT NULL)'
+          mismatch_log="$RUNNER_TEMP/ensurecreated-mismatch.log"
+          if LAP_ADOPTION_BACKUP_FILE="$RUNNER_TEMP/ensurecreated-mismatch.dump" \
+            bash scripts/adopt-ensurecreated-database.sh >"$mismatch_log" 2>&1; then
+            cat "$mismatch_log"
+            fail_ci 'Adoption unexpectedly accepted a mismatched schema.'
+          fi
+          cat "$mismatch_log"
+          grep -Fq 'the restored backup schema does not exactly match InitialCreate' "$mismatch_log" || \
+            fail_ci "Mismatch fixture was refused for an unexpected reason: $(tail -n 5 "$mismatch_log" | tr '\n' ' ')"
+          test -s "$RUNNER_TEMP/ensurecreated-mismatch.dump" || fail_ci 'Mismatched-schema run did not leave its pre-change backup.'
+          test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-mismatch.dump")" = '600' || fail_ci 'Mismatch backup mode is not 0600.'
+          history_exists="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command="SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = '__EFMigrationsHistory')::text")"
+          test "$history_exists" = 'false' || fail_ci 'Failed mismatched-schema adoption inserted EF migration history.'
+          unexpected_table_exists="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command="SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relname = 'UnexpectedLegacyTable')::text")"
+          test "$unexpected_table_exists" = 'true' || fail_ci 'Mismatched-schema adoption removed or modified the unexpected table.'
+          sentinel_count="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command="SELECT count(*)::text FROM public.\"Projects\" WHERE \"Name\" = 'ensurecreated-adoption-sentinel'")"
+          test "$sentinel_count" = '1' || fail_ci 'Existing sentinel row changed by the rejected adoption attempt.'
+          psql --no-psqlrc --set=ON_ERROR_STOP=1 "$target_url" \
+            --command='DROP TABLE public."UnexpectedLegacyTable"'
+
+          adoption_log="$RUNNER_TEMP/ensurecreated-adopted.log"
+          if LAP_ADOPTION_BACKUP_FILE="$RUNNER_TEMP/ensurecreated-adopted.dump" \
+            bash scripts/adopt-ensurecreated-database.sh >"$adoption_log" 2>&1; then
+            cat "$adoption_log"
+          else
+            adoption_exit=$?
+            cat "$adoption_log"
+            fail_ci "Positive adoption helper failed (exit $adoption_exit): $(tail -n 8 "$adoption_log" | tr '\n' ' ')"
+          fi
+          test -s "$RUNNER_TEMP/ensurecreated-adopted.dump" || fail_ci 'Successful adoption did not leave its backup.'
+          test "$(stat -c '%a' "$RUNNER_TEMP/ensurecreated-adopted.dump")" = '600' || fail_ci 'Adoption backup mode is not 0600.'
+          ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=lap_ensurecreated_adoption_test;Username=postgres;Password=postgres' \
+            dotnet ef database update \
+              --context PlatformDbContext \
+              --project src/Shared/Data/Shared.Data.csproj \
+              --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
+          migration_count="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command='SELECT count(*)::text FROM public."__EFMigrationsHistory"')"
+          test "$migration_count" = '1' || fail_ci 'Expected exactly one applied migration after adoption.'
+          migration_id="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command='SELECT "MigrationId" FROM public."__EFMigrationsHistory"')"
+          test "$migration_id" = '20261008063621_InitialCreate' || fail_ci "Unexpected EF migration ID after adoption: $migration_id"
+          sentinel_count="$(psql --no-psqlrc --set=ON_ERROR_STOP=1 --tuples-only --no-align "$target_url" \
+            --command="SELECT count(*)::text FROM public.\"Projects\" WHERE \"Name\" = 'ensurecreated-adoption-sentinel'")"
+          test "$sentinel_count" = '1' || fail_ci 'The adopted database did not preserve the existing sentinel row.'
 
       - name: Publish test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: "**/*.trx"
 
   docker-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: build-and-test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: local_agent_platform_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
       - name: Build Docker image
         run: docker build -t local-agent-platform:ci .
+
+      - name: Run hardened container against PostgreSQL
+        run: |
+          docker run --detach --name lap-runtime-smoke --network host \
+            --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
+            --security-opt no-new-privileges:true \
+            --volume "${{ github.workspace }}/workspace:/workspace" \
+            --volume lap-runtime-smoke-keyring:/var/lib/local-agent-platform/keyring \
+            --env ASPNETCORE_URLS=http://+:18080 \
+            --env ASPNETCORE_ENVIRONMENT=Production \
+            --env AllowedHosts=lap-ci.example.test \
+            --env ConnectionStrings__PlatformDb="Host=localhost;Port=5432;Database=local_agent_platform_test;Username=postgres;Password=postgres" \
+            --env Repositories__AllowedRoots__0=/workspace \
+            --env DataProtection__KeyRingPath=/var/lib/local-agent-platform/keyring \
+            --env ForwardedHeaders__Enabled=true \
+            --env ForwardedHeaders__KnownProxies__0=127.0.0.1 \
+            local-agent-platform:ci
+
+      - name: Verify live health, persistent key-ring permissions, and non-root process identity
+        run: |
+          runtime_smoke_failure() {
+            printf '::error title=Runtime smoke assertion failed::%s\n' "$1"
+            docker logs --tail 100 lap-runtime-smoke 2>&1 || true
+            exit 1
+          }
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent \
+              --header 'Host: lap-ci.example.test' \
+              --header 'X-Forwarded-For: 192.0.2.10' \
+              --header 'X-Forwarded-Proto: https' \
+              http://127.0.0.1:18080/health/live >/dev/null; then
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' lap-runtime-smoke)" != "true" ]; then
+              docker logs lap-runtime-smoke
+              exit 1
+            fi
+            sleep 2
+          done
+          curl --fail --show-error \
+            --header 'Host: lap-ci.example.test' \
+            --header 'X-Forwarded-For: 192.0.2.10' \
+            --header 'X-Forwarded-Proto: https' \
+            http://127.0.0.1:18080/health/live
+          process_uid="$(docker exec lap-runtime-smoke cat /proc/1/status | awk '$1 == "Uid:" {print $2}')"
+          test "$process_uid" = "1000" || runtime_smoke_failure "PID 1 UID was '$process_uid', expected 1000."
+          keyring_state="$(docker exec lap-runtime-smoke stat -c '%a:%u:%g' /var/lib/local-agent-platform/keyring)"
+          test "$keyring_state" = "700:1000:1000" || runtime_smoke_failure "Key-ring directory state was '$keyring_state', expected 700:1000:1000."
+          if ! login_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header 'Host: lap-ci.example.test' \
+            --header 'X-Forwarded-For: 192.0.2.10' \
+            --header 'X-Forwarded-Proto: https' \
+            http://127.0.0.1:18080/Account/Login)"; then
+            runtime_smoke_failure 'GET /Account/Login could not connect to the production smoke container.'
+          fi
+          test "$login_status" = "200" || runtime_smoke_failure "GET /Account/Login returned HTTP $login_status, expected 200."
+          if ! key_file="$(docker exec --user app lap-runtime-smoke find /var/lib/local-agent-platform/keyring -maxdepth 1 -type f -name 'key-*.xml' -print -quit)"; then
+            runtime_smoke_failure 'The app user could not enumerate the Data Protection key ring.'
+          fi
+          test -n "$key_file" || runtime_smoke_failure "No Data Protection key file was created by the login-page request."
+          if ! key_file_state="$(docker exec --user app lap-runtime-smoke stat -c '%a:%u:%g' "$key_file")"; then
+            runtime_smoke_failure 'The app user could not inspect its Data Protection key file.'
+          fi
+          test "$key_file_state" = "600:1000:1000" || runtime_smoke_failure "Data Protection key file state was '$key_file_state', expected 600:1000:1000."
+          rejected_host_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header 'Host: attacker.example.invalid' http://127.0.0.1:18080/health/live)"
+          test "$rejected_host_status" = "400" || runtime_smoke_failure "Unapproved Host returned HTTP $rejected_host_status, expected 400."
+          swagger_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --header 'Host: lap-ci.example.test' http://127.0.0.1:18080/swagger/v1/swagger.json)"
+          test "$swagger_status" = "404" || runtime_smoke_failure "Production Swagger endpoint returned HTTP $swagger_status, expected 404."
+
+      - name: Collect container logs
+        if: always()
+        run: docker logs --tail 200 lap-runtime-smoke 2>&1 || true
+
+      - name: Stop runtime smoke container
+        if: always()
+        run: docker rm --force lap-runtime-smoke || true

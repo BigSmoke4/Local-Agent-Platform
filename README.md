@@ -2,7 +2,7 @@
 
 A local-first autonomous coding platform built with **ASP.NET Core 8, PostgreSQL, EF Core, Ollama, SignalR, Roslyn, and a modular-monolith architecture**. It can index repositories, build repository context, plan multi-step coding work, execute guarded local tools, verify changes, retain semantic memory, expose an authenticated API, and stream telemetry without requiring a cloud LLM.
 
-> This repository intentionally distinguishes implemented features from environment-dependent integrations. See [`docs/STATUS.md`](docs/STATUS.md) for the current verification matrix and [`docs/SECURITY.md`](docs/SECURITY.md) for the security model.
+> This repository intentionally distinguishes implemented features from environment-dependent integrations. See [`docs/STATUS.md`](docs/STATUS.md) for the current verification matrix, [`docs/SECURITY.md`](docs/SECURITY.md) for the security model, and [`docs/PRODUCTION_DEPLOYMENT.md`](docs/PRODUCTION_DEPLOYMENT.md) for required deployment gates and known production blockers.
 
 ## What is implemented
 
@@ -12,11 +12,14 @@ A local-first autonomous coding platform built with **ASP.NET Core 8, PostgreSQL
 - Model-driven JSON planning through `IModelProvider`.
 - **General DAG task plans** with stable step IDs and `dependsOn` edges.
 - Cycle/unknown-dependency validation before execution.
-- Deterministic fan-out/fan-in execution while avoiding unsafe parallel file mutations.
+- Deterministic topological execution of dependency graphs; execution is sequential (not parallel) until resource/file locking exists.
 - Iteration, retry, duration, and repair budgets.
-- Human approval gates for risky tool calls.
+- Human approval gates for risky tool calls; approvals are scoped to a single invocation and retries require a new approval.
+- Build and test verification use real `dotnet` processes and require explicit approval because repository targets/tests execute code.
+- A bounded, heuristic security-pattern scan covers a fresh workspace traversal; it fails closed on inaccessible, linked, or over-budget coverage. It is not a full SAST engine.
 - Verification, reviewer, and bounded repair loop.
 - Cancellation and SignalR state broadcasts.
+- Startup recovery re-enqueues persisted sessions that remain unclaimed in `Created`; already-claimed sessions are not replayed because external tool side effects are not generally exactly-once safe.
 
 ### Repository intelligence and Context Engine
 
@@ -55,11 +58,12 @@ Tool execution includes:
 
 - Per-tool risk levels and timeouts.
 - Command allow/deny/approval policy.
-- Persistent per-user **Always Allow / Always Deny** rules.
-- The same persisted rules now apply to **agent-initiated** terminal calls because sessions carry their owner identity.
+- Persistent per-user **Always Deny** rules are available for terminal executables and apply to agent-initiated calls. **Always Allow is intentionally unavailable for the current High-risk TerminalTool**; every terminal call requires its own approval, and legacy allow records cannot clear that independent gate.
 - Audit rows for allowed, denied, pending, successful, and failed executions.
+- A fail-closed configured workspace-root allowlist (`Repositories:AllowedRoots`; Compose allows `/workspace`).
 - Path traversal checks plus **symlink/reparse-point-aware workspace escape prevention**.
-- Secret redaction in terminal output.
+- Secret redaction in process output, tool audit records, and security-finding excerpts.
+- The web process in Docker Compose drops to a configurable non-root UID before starting; the trusted entrypoint retains only the capabilities needed to repair key-ring volume ownership and drop privileges. `no-new-privileges` is enabled; tool processes still share the web UID/namespace, so this is defense in depth, not a hostile-code sandbox.
 
 ### Authentication, authorization, and user isolation
 
@@ -76,9 +80,11 @@ Tool execution includes:
 
 ### IDE integration
 
-- Generic authenticated REST/OpenAPI integration remains available for any compatible editor/tool.
-- A concrete **VS Code CLI adapter** is included and exposes status/open-file endpoints under `/api/ide` when the `code` CLI is installed on the host.
-- `IIdeIntegrationProvider` remains the abstraction for additional adapters.
+- An authenticated REST API supports compatible editor and automation clients.
+- A standalone **VS Code extension** is available under [`integrations/vscode`](integrations/vscode): it discovers allowed repositories/models, opens local checkouts/files (including configured container-to-host path mappings), lists changed paths from completed file-write/edit tasks, starts sessions, polls session/task status every 15 seconds while its view is visible, and supports one-time approval and cancellation.
+- The extension keeps the API key in VS Code SecretStorage and allows plain HTTP only for loopback hosts; remote API URLs must use HTTPS.
+- A separate **VS Code CLI adapter** exposes `/api/ide/status` and `/api/ide/open` when the `code` executable is available to the web process.
+- `IIdeIntegrationProvider` remains the abstraction for additional server-side adapters. See the extension README for setup and verification limits.
 
 ### Telemetry
 
@@ -92,20 +98,20 @@ Tool execution includes:
 ### API, observability, CI/CD
 
 - Authenticated API-key-protected `/api/*` endpoints.
-- Swagger/OpenAPI UI.
-- Fixed-window API rate limiting.
+- Swagger/OpenAPI UI in Development only.
+- Fixed-window API rate limiting; trusted reverse-proxy IP/protocol forwarding is opt-in and requires exact configured proxy IPs.
 - PostgreSQL and Ollama health checks.
 - Serilog structured logging.
-- OpenTelemetry ASP.NET Core/HTTP tracing.
+- OpenTelemetry ASP.NET Core/HTTP tracing instrumentation; console export is Development-only and a production exporter/retention policy must be configured separately.
 - Dockerfile + Docker Compose.
-- GitHub Actions CI for restore/build/unit/integration tests and Docker build.
+- GitHub Actions CI for VS Code Node and Extension Host tests, live-platform E2E harness safety tests, the disposable .NET fixture build/test, .NET restore/build/unit/PostgreSQL integration tests, EF model-snapshot validation and migration against fresh PostgreSQL, Docker image build, and a Production-mode hardened container smoke test (live health, exact Host filtering, disabled Swagger, Data Protection key-ring directory and generated-key permissions, and non-root UID). The opt-in live model/platform session itself is not run in CI.
 - **GitHub Actions CD** publishes images to GHCR and can deploy over SSH to a protected `production` environment when deployment variables/secrets are configured.
 
 ## Repository layout
 
 ```text
 src/
-  LocalAgentPlatform.Web/             MVC/API host, auth, SignalR, UI, VS Code adapter
+  LocalAgentPlatform.Web/             MVC/API host, auth, SignalR, UI, VS Code CLI adapter
   Modules/
     Agent/                             planner + orchestrator
     Memory/                            semantic/lexical memory
@@ -119,6 +125,9 @@ src/
     Data/                              EF Core entities and PlatformDbContext
     Kernel/                            provider/tool/telemetry abstractions
 
+integrations/
+  vscode/                             VS Code extension + Node client/filesystem tests
+
 tests/
   LocalAgentPlatform.Domain.Tests/
   LocalAgentPlatform.Integration.Tests/
@@ -126,6 +135,7 @@ tests/
 
 scripts/
   run-live-tests.sh
+  run-live-platform-e2e.js
   run-load-test.sh
   create-baseline-migration.sh
 ```
@@ -138,11 +148,12 @@ For direct development:
 - PostgreSQL 16+
 - Ollama
 - Git
-- Optional: VS Code `code` CLI
+- Optional: Node.js for the VS Code API-client tests (`cd integrations/vscode && npm test`)
+- Optional: VS Code `code` CLI for the server-side open-file adapter
 - Optional GPU telemetry: `nvidia-smi` or `rocm-smi`
 - Optional load tests: k6
 
-Docker Compose can supply PostgreSQL and Ollama.
+Docker Compose is a **local-development setup**, not the production deployment. It binds service ports to loopback, sets `ASPNETCORE_ENVIRONMENT=Development`, and has intentionally weak local-only PostgreSQL defaults (`postgres`/`postgres`). Copy `.env.example` to `.env` to override them; `.env` is ignored by Git. Never reuse those defaults on a shared host. A trusted entrypoint uses only the capabilities needed to repair key-ring volume ownership and drop privileges; the web process then runs as a configurable non-root UID (default `1000`), with all other capabilities dropped and `no-new-privileges` enabled. Make sure the host `workspace/` directory and mounted repositories are writable by that UID. On Linux, if your account uses a different UID/GID, export `LOCAL_AGENT_UID=$(id -u)` and `LOCAL_AGENT_GID=$(id -g)` before building the Compose service.
 
 ## Quick start with Docker Compose
 
@@ -161,13 +172,23 @@ Open:
 http://localhost:8080
 ```
 
-On a brand-new database the startup code bootstraps the EF schema with `EnsureCreatedAsync()` if the assembly contains no migrations. For a conventional long-term EF migration history, generate and commit a baseline migration using:
+## EF Core migrations
+
+The initial migration, designer, and model snapshot are committed under `src/Shared/Data/Migrations/`. Application startup applies pending migrations with `Database.MigrateAsync()`. CI verifies that the snapshot matches the current model, applies the baseline to a clean PostgreSQL database, and runs the integration suite against that database. Non-Development environments fail closed if the migration assembly is unexpectedly empty; only Development retains `EnsureCreatedAsync()` as a fallback.
+
+Create future migrations from the repository root with the .NET 8 SDK. Set an explicit development/disposable connection string for the design-time context; the repository no longer supplies a fallback credential:
 
 ```bash
-./scripts/create-baseline-migration.sh
+export ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=local_agent_platform;Username=postgres;Password=postgres'
+dotnet tool restore
+dotnet ef migrations add AddYourFeature \
+  --context PlatformDbContext \
+  --project src/Shared/Data/Shared.Data.csproj \
+  --startup-project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj \
+  --output-dir Migrations
 ```
 
-After a migration exists, startup automatically uses `Database.MigrateAsync()`.
+Existing installations created before the baseline with `EnsureCreatedAsync()` have no `__EFMigrationsHistory` row. Applying the initial migration directly will fail because its tables already exist. An opt-in draft helper at `scripts/adopt-ensurecreated-database.sh` is exercised in CI only against a disposable PostgreSQL fixture: it creates a protected backup, restores it in a scratch database, refuses schema mismatches, and applies the baseline history transactionally for the exact fixture schema. This validates the tested fixture paths, not real installations, credentials, extensions, or operational conditions. The helper is not a supported production procedure; do not run it against valuable/live data. Any real baseline-adoption cutover remains operator-managed and requires independent backup/restore verification and review.
 
 ## Run directly
 
@@ -179,10 +200,12 @@ ollama pull llama3.2:3b
 ollama pull nomic-embed-text
 ```
 
-Set configuration if needed:
+Direct runs are for development only. Set configuration explicitly (the web host has no bundled database credentials):
 
 ```bash
+export ASPNETCORE_ENVIRONMENT=Development
 export ConnectionStrings__PlatformDb='Host=localhost;Port=5432;Database=local_agent_platform;Username=postgres;Password=postgres'
+export Repositories__AllowedRoots__0="$HOME/dev"
 export Ollama__BaseUrl='http://localhost:11434'
 export Ollama__EmbeddingModel='nomic-embed-text'
 ```
@@ -197,7 +220,7 @@ dotnet run --project src/LocalAgentPlatform.Web/LocalAgentPlatform.Web.csproj
 
 ## First account and security setup
 
-The first registered account becomes `Admin`. Registration closes to anonymous users after that; an admin can create additional users.
+The first registered account becomes `Admin`. In Development, that local bootstrap is open as before. In Production, first-admin registration is blocked unless the operator supplies `Security__BootstrapAdminToken` (at least 32 bytes) out of band; generate one with `openssl rand -hex 32`, provide it only through a secret manager/environment, and remove it after the first admin is created. Registration closes to anonymous users after that; an admin can create additional users.
 
 Each new account receives a random recovery code displayed exactly once. Save it securely. It is hashed in the database and rotated when used.
 
@@ -205,7 +228,13 @@ After login, open the Account Security page and choose **Set up MFA**. Add the d
 
 ## Register a repository
 
-When running directly, register a path that exists on the host. When running in Docker, mount repositories under the Compose `./workspace:/workspace` volume and register the container path, for example:
+Repository access is restricted to explicitly configured workspace roots. The default configuration is fail-closed (`Repositories:AllowedRoots` is empty), so direct runs must set an allowlisted root before registering repositories. For example:
+
+```bash
+export Repositories__AllowedRoots__0="$HOME/dev"
+```
+
+The Docker Compose configuration allowlists `/workspace`. Mount repositories under the Compose `./workspace:/workspace` volume and register a path beneath it, for example:
 
 ```text
 /workspace/my-repository
@@ -247,7 +276,38 @@ export LAP_OLLAMA_MODEL='llama3.2:3b'
 ./scripts/run-live-tests.sh
 ```
 
-`LAP_RUN_LIVE_TESTS=1` prevents accidental model-dependent CI failures while still keeping a real local-runtime test suite in the repository.
+The live Ollama test is reported as **skipped**, not passed, unless `LAP_RUN_LIVE_TESTS=1` is set. When enabled, it requires a reachable Ollama server with the configured model already pulled; set `LAP_OLLAMA_URL` and `LAP_OLLAMA_MODEL` as needed.
+
+### Opt-in live platform/API end-to-end test
+
+`scripts/run-live-platform-e2e.js` drives a real authenticated API session against an already-running platform. It checks readiness, model/repository discovery, creates a session through `/api/agent/sessions`, polls persisted task state, and verifies one exact file write from the configured Ollama model. If the platform reaches its system-generated BuildTool or TestTool approval gate, the harness reports `AwaitingApproval`, exits with code 2, and leaves the session and marker file intact. It never calls the approval endpoint or runs verification tasks on the operator's behalf. Review and approve a pending task yourself in the platform UI only if appropriate; this stopped harness does not resume afterward and makes no claim that BuildTool/TestTool succeeded. The test runner does not launch VS Code, so a live extension-host/UI interaction remains a separate verification gap.
+
+The harness requires an exact disposable-fixture repository and one explicit disposable-repository confirmation. Never point it at a real project or valuable working tree. It calls a real platform and real configured Ollama model; CI tests the harness guards but do not simulate a live model session.
+
+Prepare the checked-in fixture as a dedicated clean repository. For Docker Compose, run from the project root so it is mounted at `/workspace/live-e2e`:
+
+```bash
+mkdir -p workspace/live-e2e
+cp -a tests/fixtures/live-platform-e2e/. workspace/live-e2e/
+git -C workspace/live-e2e init
+git -C workspace/live-e2e add --all
+git -C workspace/live-e2e -c user.name='LAP E2E Fixture' -c user.email='lap-e2e@example.invalid' commit -m 'Prepare disposable live E2E workspace'
+```
+
+Register that directory in the platform UI, register/pull the selected Ollama model, and create an API key for the account that owns the repository. Set the repository ID and path to the values returned by the running service (`/workspace/live-e2e` for Compose; the local path when running directly):
+
+```bash
+export LAP_E2E_BASE_URL='http://localhost:8080'
+export LAP_E2E_API_KEY='lap_...' # do not commit or print this value
+export LAP_E2E_REPOSITORY_ID='<UUID from GET /api/repositories>'
+export LAP_E2E_MODEL_ID='llama3.2:3b' # exact registered Ollama modelId
+export LAP_E2E_SERVER_REPOSITORY_PATH='/workspace/live-e2e'
+export LAP_E2E_LOCAL_REPOSITORY_PATH="$PWD/workspace/live-e2e"
+export LAP_E2E_CONFIRM_DISPOSABLE_REPOSITORY='I_CONFIRM_THIS_REPOSITORY_IS_DISPOSABLE'
+node scripts/run-live-platform-e2e.js
+```
+
+Remote platform URLs must use HTTPS; plain HTTP is limited to loopback. The harness refuses non-fixture contents, a dirty Git worktree, unexpected model-planned tools, and other file writes. It does not approve BuildTool/TestTool; if one reaches `AwaitingApproval`, it stops with exit code 2, leaves the task pending for a human decision, and preserves the marker for inspection. On a fully successful run, it removes the marker file; failures preserve workspace changes. Agent session/audit data and ignored `bin/`/`obj/` outputs remain. The harness safety/unit tests run in CI, but an actual live-platform/model run still requires an operator's reachable PostgreSQL/Ollama-backed instance and has not been performed here.
 
 ## Load/performance testing
 
@@ -282,24 +342,28 @@ API clients send:
 X-Api-Key: lap_...
 ```
 
-VS Code integration endpoints:
+The standalone extension uses these authenticated API routes:
+
+```text
+GET  /api/repositories
+GET  /api/models
+GET  /api/agent/sessions
+GET  /api/agent/sessions/{id}/tasks
+POST /api/agent/sessions
+POST /api/agent/sessions/{id}/approve
+POST /api/agent/sessions/{id}/cancel
+```
+
+Session creation takes `repositoryId`, `modelId`, and `userRequest`. Repository discovery is owner-scoped and excludes paths outside the configured workspace roots. See [`integrations/vscode/README.md`](integrations/vscode/README.md) for extension setup.
+
+The separate server-side CLI adapter exposes:
 
 ```text
 GET  /api/ide/status
 POST /api/ide/open
 ```
 
-Example request body:
-
-```json
-{
-  "path": "/workspace/my-repo/src/Program.cs",
-  "line": 42,
-  "column": 1
-}
-```
-
-The adapter requires the `code` executable to be available to the web process.
+The open-file request accepts a canonical file path under an allowed repository, plus an optional line and column. This adapter requires the `code` executable to be available to the web process.
 
 ## CI/CD configuration
 
@@ -308,9 +372,9 @@ The adapter requires the `code` executable to be available to the web process.
 `.github/workflows/cd.yml`:
 
 1. Builds the Docker image.
-2. Publishes `latest` and SHA-tagged images to GHCR.
-3. Optionally deploys the `web` service over SSH.
-4. Gates deployment with `/health/ready`.
+2. Publishes `latest` and full-commit-SHA-tagged images to GHCR.
+3. Optionally deploys the `web` service over SSH from `main`, passing the immutable image as `LAP_DEPLOY_IMAGE`.
+4. Gates deployment with `/health/ready`; the external production Compose file must use that supplied image reference rather than `latest` or a local build.
 
 For SSH deployment configure a GitHub `production` environment with:
 
@@ -333,8 +397,8 @@ Production secrets remain outside the repository and should be supplied through 
 - Cross-file relationship generation is bounded to avoid unbounded indexing cost on very large repositories.
 - The semantic memory vector is currently stored as JSON for provider/database portability rather than requiring `pgvector`. For very large memory stores, migrate to `pgvector` or another ANN index.
 - NVIDIA and ROCm telemetry depend on vendor CLIs being installed and visible to the application process.
-- The VS Code adapter is a CLI integration, not a custom VS Code extension.
-- The baseline EF migration should be generated and committed from a machine with the .NET 8 SDK before treating schema evolution as production-ready.
+- The VS Code extension has 23 passing Node API-client/command-flow/manifest/filesystem-safety tests and packages successfully as a VSIX. The VS Code Extension Host smoke test passes in GitHub Actions; local VS Code download was blocked by a TLS failure. An opt-in live platform/API session E2E harness is implemented and its guard tests run in CI, but it has not yet been executed against a live app/model. The extension itself has not been exercised against a live platform.
+- The baseline migration and snapshot are checked in. CI now rejects a missing migration, detects model/snapshot drift, and applies the migration to a fresh PostgreSQL database before integration testing. Existing pre-migration `EnsureCreatedAsync()` databases still require a backed-up, explicit adoption cutover.
 
 ## Documentation
 
@@ -344,4 +408,4 @@ Production secrets remain outside the repository and should be supplied through 
 
 ## License
 
-No license file is currently included. Add one before distributing the repository under an open-source license.
+This project is licensed under the MIT License. See [`LICENSE`](LICENSE).

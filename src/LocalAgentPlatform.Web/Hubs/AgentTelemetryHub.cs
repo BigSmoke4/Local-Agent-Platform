@@ -1,34 +1,53 @@
+using LocalAgentPlatform.Shared.Data;
+using LocalAgentPlatform.Shared.Kernel.Files;
+using LocalAgentPlatform.Web.Security;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
 
 namespace LocalAgentPlatform.Web.Hubs;
 
-/// <summary>
-/// Real-time push channel for agent state, hardware telemetry, and tool events
-/// (spec Section 18/20). Clients join a group per agent session to receive that
-/// session's updates without polling. This hub only *broadcasts* — all state still
-/// lives in Postgres; a client that misses a message (or connects late) can always
-/// fall back to the existing MVC pages, which read the same source of truth.
-/// Requires the same cookie session as the MVC UI — the browser sends it
-/// automatically on the hub's WebSocket/long-polling handshake.
-/// </summary>
+/// <summary>Real-time push channel for agent state and hardware telemetry. Joining an
+/// agent group is owner-checked against PostgreSQL; authenticated users cannot subscribe
+/// to another user's session by guessing its GUID.</summary>
 [Authorize]
 public sealed class AgentTelemetryHub : Hub
 {
-    public async Task JoinSessionGroup(string sessionId) =>
-        await Groups.AddToGroupAsync(Context.ConnectionId, SessionGroup(sessionId));
+    private readonly PlatformDbContext _db;
+    private readonly IWorkspaceRootPolicy _workspacePolicy;
 
-    public async Task LeaveSessionGroup(string sessionId) =>
-        await Groups.RemoveFromGroupAsync(Context.ConnectionId, SessionGroup(sessionId));
+    public AgentTelemetryHub(PlatformDbContext db, IWorkspaceRootPolicy workspacePolicy)
+    {
+        _db = db;
+        _workspacePolicy = workspacePolicy;
+    }
 
-    public async Task JoinHardwareGroup() =>
-        await Groups.AddToGroupAsync(Context.ConnectionId, HardwareGroup);
+    public async Task JoinSessionGroup(string sessionId)
+    {
+        if (!Guid.TryParse(sessionId, out var id)) throw new HubException("Session not found.");
+        var ownerId = Context.User?.RequireUserId();
+        if (ownerId is null) throw new HubException("Session not found.");
+        var repositoryPath = await _db.AgentSessions
+            .Where(s => s.Id == id && s.OwnerUserId == ownerId.Value)
+            .Join(_db.Repositories, s => s.RepositoryId, r => r.Id, (_, r) => r.LocalPath)
+            .FirstOrDefaultAsync();
+        if (repositoryPath is null || !_workspacePolicy.IsAllowed(repositoryPath))
+            throw new HubException("Session not found.");
+        await Groups.AddToGroupAsync(Context.ConnectionId, SessionGroup(id.ToString()));
+    }
+
+    public async Task LeaveSessionGroup(string sessionId)
+    {
+        if (!Guid.TryParse(sessionId, out var id)) return;
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, SessionGroup(id.ToString()));
+    }
+
+    public Task JoinHardwareGroup() => Groups.AddToGroupAsync(Context.ConnectionId, HardwareGroup);
 
     public static string SessionGroup(string sessionId) => $"session:{sessionId}";
     public const string HardwareGroup = "hardware-telemetry";
 }
 
-/// <summary>Typed helper so publishers don't hand-roll method name strings.</summary>
 public static class AgentTelemetryEvents
 {
     public const string AgentSessionUpdated = "AgentSessionUpdated";

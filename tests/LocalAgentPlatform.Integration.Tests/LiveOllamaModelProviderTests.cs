@@ -5,13 +5,21 @@ using Xunit;
 
 namespace LocalAgentPlatform.Integration.Tests;
 
+public sealed class LiveOllamaFactAttribute : FactAttribute
+{
+    public LiveOllamaFactAttribute()
+    {
+        if (Environment.GetEnvironmentVariable("LAP_RUN_LIVE_TESTS") != "1")
+            Skip = "Set LAP_RUN_LIVE_TESTS=1 and configure a reachable Ollama server to run this live test.";
+    }
+}
+
 public sealed class LiveOllamaModelProviderTests
 {
-    [Fact]
+    [LiveOllamaFact]
     [Trait("Category", "Live")]
     public async Task RealHttp_ListModels_And_Generate_WhenEnabled()
     {
-        if (Environment.GetEnvironmentVariable("LAP_RUN_LIVE_TESTS") != "1") return;
         var baseUrl = Environment.GetEnvironmentVariable("LAP_OLLAMA_URL") ?? "http://localhost:11434";
         var model = Environment.GetEnvironmentVariable("LAP_OLLAMA_MODEL") ?? "llama3.2:3b";
         var provider = new OllamaModelProvider(new HttpClient(), Options.Create(new OllamaOptions { BaseUrl = baseUrl, RequestTimeoutSeconds = 120 }), NullLogger<OllamaModelProvider>.Instance);

@@ -53,10 +53,17 @@ public sealed class ReviewerService
             if (json is null) return new ReviewOutcome("Unavailable", "Reviewer model did not return a parseable verdict.");
 
             var parsed = JsonSerializer.Deserialize<VerdictShape>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-            if (parsed?.Verdict is null) return new ReviewOutcome("Unavailable", "Reviewer JSON was missing a verdict field.");
+            if (parsed?.Verdict is null ||
+                (!string.Equals(parsed.Verdict, "Approved", StringComparison.OrdinalIgnoreCase) &&
+                 !string.Equals(parsed.Verdict, "Rejected", StringComparison.OrdinalIgnoreCase)))
+                return new ReviewOutcome("Unavailable", "Reviewer JSON did not contain a recognized Approved or Rejected verdict.");
 
             var verdict = string.Equals(parsed.Verdict, "Rejected", StringComparison.OrdinalIgnoreCase) ? "Rejected" : "Approved";
             return new ReviewOutcome(verdict, parsed.Reason ?? "(no reason given)");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -71,10 +78,25 @@ public sealed class ReviewerService
         var start = text.IndexOf('{');
         if (start < 0) return null;
         var depth = 0;
+        var inString = false;
+        var escaped = false;
         for (var i = start; i < text.Length; i++)
         {
-            if (text[i] == '{') depth++;
-            else if (text[i] == '}') { depth--; if (depth == 0) return text[start..(i + 1)]; }
+            var current = text[i];
+            if (inString)
+            {
+                if (escaped) escaped = false;
+                else if (current == '\\') escaped = true;
+                else if (current == '"') inString = false;
+                continue;
+            }
+            if (current == '"') { inString = true; continue; }
+            if (current == '{') depth++;
+            else if (current == '}')
+            {
+                depth--;
+                if (depth == 0) return text[start..(i + 1)];
+            }
         }
         return null;
     }

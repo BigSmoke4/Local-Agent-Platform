@@ -9,7 +9,9 @@ public static class IndexingIgnoreRules
 {
     private static readonly string[] DefaultIgnoredDirectoryNames =
     {
-        ".git", "bin", "obj", "node_modules", ".vs", ".idea", "dist", "build", ".vscode"
+        ".git", "bin", "obj", "node_modules", ".vs", ".idea", "dist", "build", ".vscode",
+        ".venv", "venv", "env", ".tox", ".next", ".nuxt", ".svelte-kit", ".vite", "coverage",
+        "target", "vendor", ".terraform", ".gradle", ".mypy_cache", ".ruff_cache", "__pycache__"
     };
 
     public static bool IsIgnoredDirectory(string directoryName, IReadOnlyCollection<string>? extraIgnores = null)

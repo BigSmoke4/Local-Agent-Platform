@@ -6,6 +6,14 @@
         <div class="status-fail" style="margin-bottom:0.5rem;">@ViewData.ModelState.Values.SelectMany(v => v.Errors).FirstOrDefault()?.ErrorMessage</div>
     }
     <form method="post" asp-action="Register">
+        @if (ViewBag.RequiresBootstrapToken == true)
+        {
+            @if (ViewBag.BootstrapTokenConfigured != true)
+            {
+                <p class="status-fail">First production administrator setup is disabled until the deployment operator configures Security__BootstrapAdminToken.</p>
+            }
+            <input type="password" name="bootstrapToken" placeholder="Deployment bootstrap token" autocomplete="off" style="width:100%; margin-bottom:0.5rem;" required />
+        }
         <input type="text" name="userName" placeholder="Username" style="width:100%; margin-bottom:0.5rem;" required autofocus />
         <input type="password" name="password" placeholder="Password (min 12 characters)" style="width:100%; margin-bottom:0.5rem;" required minlength="12" />
         <button type="submit" class="btn-small">Register</button>

@@ -2,6 +2,7 @@ using LocalAgentPlatform.Modules.RepositoryAnalysis.Application.Services;
 using LocalAgentPlatform.Shared.Data;
 using LocalAgentPlatform.Shared.Data.Entities;
 using LocalAgentPlatform.Shared.Kernel.BackgroundWork;
+using LocalAgentPlatform.Shared.Kernel.Files;
 using LocalAgentPlatform.Web.Models;
 using LocalAgentPlatform.Web.Security;
 using Microsoft.AspNetCore.Mvc;
@@ -14,12 +15,14 @@ public class RepositoriesController : Controller
     private readonly PlatformDbContext _db;
     private readonly IBackgroundTaskQueue _queue;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IWorkspaceRootPolicy _workspacePolicy;
 
-    public RepositoriesController(PlatformDbContext db, IBackgroundTaskQueue queue, IServiceScopeFactory scopeFactory)
+    public RepositoriesController(PlatformDbContext db, IBackgroundTaskQueue queue, IServiceScopeFactory scopeFactory, IWorkspaceRootPolicy workspacePolicy)
     {
         _db = db;
         _queue = queue;
         _scopeFactory = scopeFactory;
+        _workspacePolicy = workspacePolicy;
     }
 
     public async Task<IActionResult> Index(CancellationToken ct)
@@ -30,6 +33,7 @@ public class RepositoriesController : Controller
             .Where(r => r.Project!.OwnerUserId == userId)
             .OrderByDescending(r => r.LastIndexedAtUtc)
             .ToListAsync(ct);
+        repos = repos.Where(r => _workspacePolicy.IsAllowed(r.LocalPath)).ToList();
 
         var latestJobs = await _db.RepositoryIndexingJobs
             .GroupBy(j => j.RepositoryId)
@@ -43,6 +47,7 @@ public class RepositoriesController : Controller
             .ToListAsync(ct);
 
         var symbolCounts = await _db.CodeSymbols
+            .Where(s => s.FileSnapshot != null && !s.FileSnapshot.IsDeleted)
             .GroupBy(s => s.RepositoryId)
             .Select(g => new { RepositoryId = g.Key, Count = g.Count() })
             .ToListAsync(ct);
@@ -83,15 +88,21 @@ public class RepositoriesController : Controller
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Register(Guid projectId, string localPath, CancellationToken ct)
     {
-        if (!Directory.Exists(localPath))
+        if (string.IsNullOrWhiteSpace(localPath) || !Path.IsPathFullyQualified(localPath) || !Directory.Exists(localPath))
         {
-            TempData["RepoError"] = $"Path does not exist on this host: {localPath}";
+            TempData["RepoError"] = "Choose an existing absolute directory on this host.";
+            return RedirectToAction(nameof(Index));
+        }
+        var normalizedPath = Path.GetFullPath(localPath);
+        if (!_workspacePolicy.IsAllowed(normalizedPath))
+        {
+            TempData["RepoError"] = "This directory is outside the configured repository workspace roots.";
             return RedirectToAction(nameof(Index));
         }
 
         var userId = User.RequireUserId();
         if (!await _db.Projects.AnyAsync(p => p.Id == projectId && p.OwnerUserId == userId, ct)) return NotFound();
-        var repo = new Repository { ProjectId = projectId, LocalPath = Path.GetFullPath(localPath) };
+        var repo = new Repository { ProjectId = projectId, LocalPath = normalizedPath };
         _db.Repositories.Add(repo);
         await _db.SaveChangesAsync(ct);
 
@@ -103,7 +114,9 @@ public class RepositoriesController : Controller
     public async Task<IActionResult> TriggerIndex(Guid repositoryId, CancellationToken requestCt)
     {
         var userId = User.RequireUserId();
-        if (!await _db.Repositories.AnyAsync(r => r.Id == repositoryId && r.Project!.OwnerUserId == userId, requestCt)) return NotFound();
+        var repoPath = await _db.Repositories.Where(r => r.Id == repositoryId && r.Project!.OwnerUserId == userId)
+            .Select(r => r.LocalPath).FirstOrDefaultAsync(requestCt);
+        if (repoPath is null || !_workspacePolicy.IsAllowed(repoPath)) return NotFound();
         // Runs on the background queue (Section 40) — never blocks this HTTP request.
         // A fresh DI scope is created inside the work item because PlatformDbContext
         // is scoped and the queue drains outside any HTTP request scope.
@@ -123,11 +136,12 @@ public class RepositoriesController : Controller
     {
         var userId = User.RequireUserId();
         var repo = await _db.Repositories.Include(r => r.Project).FirstOrDefaultAsync(r => r.Id == repositoryId && r.Project!.OwnerUserId == userId, ct);
-        if (repo is null) return NotFound();
+        if (repo is null || !_workspacePolicy.IsAllowed(repo.LocalPath)) return NotFound();
 
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 20, 250);
-        var query = _db.CodeSymbols.Where(s => s.RepositoryId == repositoryId);
+        var query = _db.CodeSymbols.Where(s => s.RepositoryId == repositoryId &&
+            s.FileSnapshot != null && !s.FileSnapshot.IsDeleted);
         if (!string.IsNullOrWhiteSpace(q)) query = query.Where(s => EF.Functions.ILike(s.Name, $"%{q}%") || (s.Signature != null && EF.Functions.ILike(s.Signature, $"%{q}%")));
         var total = await query.CountAsync(ct);
         var symbols = await query.OrderBy(s => s.ContainingNamespace).ThenBy(s => s.ContainingTypeName).ThenBy(s => s.Name)

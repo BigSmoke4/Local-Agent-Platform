@@ -3,15 +3,16 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: local_agent_platform
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      # Local-development defaults only; override for shared/non-local environments.
+      POSTGRES_DB: ${LOCAL_AGENT_POSTGRES_DB:-local_agent_platform}
+      POSTGRES_USER: ${LOCAL_AGENT_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${LOCAL_AGENT_POSTGRES_PASSWORD:-postgres}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -19,7 +20,7 @@ services:
   ollama:
     image: ollama/ollama:latest
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollamadata:/root/.ollama
 
@@ -27,21 +28,37 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        APP_UID: ${LOCAL_AGENT_UID:-1000}
+        APP_GID: ${LOCAL_AGENT_GID:-1000}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
       ollama:
         condition: service_started
     environment:
-      ConnectionStrings__PlatformDb: "Host=postgres;Port=5432;Database=local_agent_platform;Username=postgres;Password=postgres"
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__PlatformDb: "Host=postgres;Port=5432;Database=${LOCAL_AGENT_POSTGRES_DB:-local_agent_platform};Username=${LOCAL_AGENT_POSTGRES_USER:-postgres};Password=${LOCAL_AGENT_POSTGRES_PASSWORD:-postgres}"
       Ollama__BaseUrl: "http://ollama:11434"
+      Repositories__AllowedRoots__0: "/workspace"
+      DataProtection__KeyRingPath: "/var/lib/local-agent-platform/keyring"
     volumes:
       # Mount repositories you want the platform to work on here, then register
       # them (from inside the container) as e.g. /workspace/my-repo.
       - ./workspace:/workspace
+      - dataprotection:/var/lib/local-agent-platform/keyring
 
 volumes:
   pgdata:
   ollamadata:
+  dataprotection:

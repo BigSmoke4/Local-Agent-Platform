@@ -1,4 +1,6 @@
 using System.Text.RegularExpressions;
+using LocalAgentPlatform.Shared.Kernel.Files;
+using LocalAgentPlatform.Shared.Kernel.Security;
 
 namespace LocalAgentPlatform.Modules.Verification.Infrastructure.Security;
 
@@ -23,44 +25,103 @@ public sealed class RegexSecurityPatternScanner : ISecurityPatternScanner
 {
     private static readonly (Regex Pattern, string Label, string Severity)[] Rules =
     {
-        (new Regex(@"(?i)(api[_-]?key|secret|password)\s*=\s*""[^""]{8,}""", RegexOptions.Compiled),
+        (new Regex(@"(?i)(api[_-]?key|secret|password)\s*=\s*""[^""]{8,}""", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100)),
             "Hardcoded credential-like literal", "High"),
-        (new Regex(@"(?i)Server=.*;.*Password=[^;""]+;", RegexOptions.Compiled),
+        (new Regex(@"(?i)Server=.*;.*Password=[^;""]+;", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100)),
             "Connection string with inline password", "High"),
-        (new Regex(@"\bnew\s+MD5CryptoServiceProvider\b|\bMD5\.Create\(\)|\bnew\s+SHA1CryptoServiceProvider\b", RegexOptions.Compiled),
+        (new Regex(@"\bnew\s+MD5CryptoServiceProvider\b|\bMD5\.Create\(\)|\bnew\s+SHA1CryptoServiceProvider\b", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100)),
             "Use of a weak hash algorithm (MD5/SHA1) — avoid for security-sensitive hashing", "Medium"),
-        (new Regex(@"""\s*\+\s*\w+\s*\+\s*""[^""]*(SELECT|INSERT|UPDATE|DELETE)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase),
+        (new Regex(@"""\s*\+\s*\w+\s*\+\s*""[^""]*(SELECT|INSERT|UPDATE|DELETE)\b", RegexOptions.Compiled | RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(100)),
             "String-concatenated SQL — possible SQL injection risk, prefer parameterized queries", "High"),
-        (new Regex(@"\bDangerousGetHttpClientHandler\b|\bServerCertificateCustomValidationCallback\s*=\s*.*=>\s*true", RegexOptions.Compiled),
+        (new Regex(@"\bDangerousGetHttpClientHandler\b|\bServerCertificateCustomValidationCallback\s*=\s*.*=>\s*true", RegexOptions.Compiled, TimeSpan.FromMilliseconds(100)),
             "TLS certificate validation appears to be disabled", "High"),
     };
 
     public async Task<IReadOnlyList<SecurityFinding>> ScanAsync(
         string repositoryRootPath, IReadOnlyList<string> relativeFilePaths, CancellationToken ct = default)
     {
+        const long maxFileBytes = 2 * 1024 * 1024;
+        const long maxTotalBytes = 64 * 1024 * 1024;
+        const int maxFindings = 10_000;
         var findings = new List<SecurityFinding>();
+        long totalBytes = 0;
 
         foreach (var relativePath in relativeFilePaths)
         {
             ct.ThrowIfCancellationRequested();
-            var fullPath = Path.Combine(repositoryRootPath, relativePath);
-            if (!File.Exists(fullPath)) continue;
-
-            string[] lines;
-            try { lines = await File.ReadAllLinesAsync(fullPath, ct); }
-            catch (IOException) { continue; } // unreadable file — skip, don't fabricate a finding or a failure
-
-            for (var i = 0; i < lines.Length; i++)
+            if (string.IsNullOrWhiteSpace(relativePath)) continue;
+            if (!WorkspacePathGuard.IsWithinWorkspace(repositoryRootPath, relativePath))
+                throw new InvalidOperationException($"Security scan refused a path outside the workspace: {relativePath}");
+            var fullPath = Path.GetFullPath(Path.Combine(repositoryRootPath, relativePath));
+            if (!WorkspacePathGuard.IsRegularFile(fullPath))
+                throw new InvalidOperationException($"Security scan refused a non-regular file: {relativePath}; verification is incomplete.");
+            long fileLength;
+            try { fileLength = new FileInfo(fullPath).Length; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                foreach (var (pattern, label, severity) in Rules)
+                // The scanner received this path from a complete inventory. If it
+                // disappeared or became unreadable before inspection, fail closed
+                // rather than silently claiming the remaining subset was scanned.
+                throw new InvalidOperationException($"Security scan could not inspect {relativePath}; verification is incomplete.", ex);
+            }
+            if (fileLength > maxFileBytes)
+                throw new InvalidOperationException($"Security scan stopped: {relativePath} exceeds the {maxFileBytes}-byte per-file limit; verification is incomplete.");
+            totalBytes += fileLength;
+            if (totalBytes > maxTotalBytes)
+                throw new InvalidOperationException($"Security scan stopped: source file total exceeds the {maxTotalBytes}-byte scan budget; verification is incomplete.");
+
+            try
+            {
+                await using var stream = new FileStream(
+                    fullPath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+                if (stream.Length > maxFileBytes)
+                    throw new InvalidOperationException($"Security scan stopped: {relativePath} grew beyond the {maxFileBytes}-byte per-file limit; verification is incomplete.");
+
+                // Buffer at most the configured per-file byte limit before decoding so a
+                // concurrently growing file cannot create an unbounded line/string while
+                // StreamReader.ReadLineAsync is accumulating input.
+                using var contents = new MemoryStream((int)Math.Min(stream.Length, maxFileBytes));
+                var buffer = new byte[64 * 1024];
+                long bytesRead = 0;
+                int read;
+                while ((read = await stream.ReadAsync(buffer.AsMemory(), ct)) > 0)
                 {
-                    if (pattern.IsMatch(lines[i]))
+                    bytesRead += read;
+                    if (bytesRead > maxFileBytes)
+                        throw new InvalidOperationException($"Security scan stopped: {relativePath} grew beyond the {maxFileBytes}-byte per-file limit; verification is incomplete.");
+                    await contents.WriteAsync(buffer.AsMemory(0, read), ct);
+                }
+                if (bytesRead > fileLength)
+                {
+                    totalBytes += bytesRead - fileLength;
+                    if (totalBytes > maxTotalBytes)
+                        throw new InvalidOperationException($"Security scan stopped: source file total exceeds the {maxTotalBytes}-byte scan budget; verification is incomplete.");
+                }
+
+                contents.Position = 0;
+                using var reader = new StreamReader(contents, detectEncodingFromByteOrderMarks: true);
+                var lineNumber = 0;
+                while (await reader.ReadLineAsync(ct) is { } line)
+                {
+                    lineNumber++;
+                    foreach (var (pattern, label, severity) in Rules)
                     {
+                        if (!pattern.IsMatch(line)) continue;
+                        var redactedExcerpt = SecretRedactor.Redact(line.Trim());
+                        var boundedExcerpt = redactedExcerpt.Length > 160 ? redactedExcerpt[..160] + "..." : redactedExcerpt;
+                        if (findings.Count >= maxFindings)
+                            throw new InvalidOperationException($"Security scan stopped after {maxFindings} findings; verification is incomplete.");
                         findings.Add(new SecurityFinding(
-                            relativePath, i + 1, label, severity,
-                            lines[i].Trim().Length > 160 ? lines[i].Trim()[..160] + "..." : lines[i].Trim()));
+                            relativePath, lineNumber, label, severity, boundedExcerpt));
                     }
                 }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (InvalidOperationException) { throw; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new InvalidOperationException($"Security scan could not read {relativePath}; verification is incomplete.", ex);
             }
         }
 

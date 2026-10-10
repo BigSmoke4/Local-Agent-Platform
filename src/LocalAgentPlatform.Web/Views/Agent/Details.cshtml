@@ -21,7 +21,7 @@
     {
         <div class="panel__row"><span>Failure reason</span><span class="status-fail">@s.FailureReason</span></div>
     }
-    @if (Model.IsRunning)
+    @if (Model.IsRunning || s.State is ("Created" or "AwaitingApproval"))
     {
         <form method="post" asp-action="Cancel" style="margin-top:0.5rem;">
             <input type="hidden" name="sessionId" value="@s.Id" />
@@ -42,7 +42,7 @@
 }
 
 <section class="panel">
-    <h2 class="panel__title">TASK GRAPH (linear chain)</h2>
+    <h2 class="panel__title">TASK GRAPH (sequential topological execution)</h2>
     <table class="data-table">
         <thead><tr><th>#</th><th>Type</th><th>Description</th><th>Tool</th><th>Status</th><th>Retries</th><th></th></tr></thead>
         <tbody>
@@ -58,10 +58,14 @@
                 <td>
                     @if (t.Status == "AwaitingApproval")
                     {
+                        <details open style="margin-bottom:0.4rem;">
+                            <summary>Exact requested tool arguments</summary>
+                            <pre style="white-space:pre-wrap; max-height:180px; overflow:auto;">@t.ArgumentsJson</pre>
+                        </details>
                         <form method="post" asp-action="Approve">
                             <input type="hidden" name="sessionId" value="@s.Id" />
                             <input type="hidden" name="taskId" value="@t.Id" />
-                            <button type="submit" class="btn-small" style="border-color:var(--danger);">Approve &amp; Run</button>
+                            <button type="submit" class="btn-small" style="border-color:var(--danger);">Approve &amp; Run Once</button>
                         </form>
                     }
                 </td>
@@ -135,7 +139,7 @@
                 <tr>
                     <td>@u.InputTokens</td>
                     <td>@u.OutputTokens</td>
-                    <td>@u.TokensPerSecond.ToString("0.0")</td>
+                    <td>@(u.TokensPerSecond > 0 ? u.TokensPerSecond.ToString("0.0") : "n/a")</td>
                     <td>@(u.TimeToFirstToken.HasValue ? $"{u.TimeToFirstToken.Value.TotalMilliseconds:0} ms" : "n/a")</td>
                 </tr>
             }

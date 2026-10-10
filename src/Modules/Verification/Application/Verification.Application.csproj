@@ -11,6 +11,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Domain\Verification.Domain.csproj" />
     <ProjectReference Include="..\Infrastructure\Verification.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\RepositoryAnalysis\Application\RepositoryAnalysis.Application.csproj" />
     <ProjectReference Include="..\..\..\Shared\Data\Shared.Data.csproj" />
     <ProjectReference Include="..\..\..\Shared\Kernel\Shared.Kernel.csproj" />
     <ProjectReference Include="..\..\Tools\Application\Tools.Application.csproj" />

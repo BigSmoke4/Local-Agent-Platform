@@ -11,11 +11,12 @@ permissions:
 
 jobs:
   publish-image:
-    runs-on: ubuntu-latest
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
     outputs:
-      image: ${{ steps.meta.outputs.tags }}
+      image: ${{ steps.immutable-image.outputs.value }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -27,8 +28,17 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=sha
+            type=sha,format=long
             type=raw,value=latest
+      - id: immutable-image
+        name: Select immutable commit image reference
+        shell: bash
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          image="$(printf '%s\n' "$TAGS" | grep -E -m1 ':sha-[0-9a-f]{40}$')"
+          test -n "$image"
+          echo "value=$image" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -38,21 +48,25 @@ jobs:
 
   deploy-production:
     needs: publish-image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
-    if: ${{ vars.ENABLE_SSH_DEPLOY == 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && vars.ENABLE_SSH_DEPLOY == 'true' }}
     steps:
-      - name: Deploy over SSH
+      - name: Deploy immutable image over SSH
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          LAP_DEPLOY_IMAGE: ${{ needs.publish-image.outputs.image }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: LAP_DEPLOY_IMAGE
           script: |
-            set -e
+            set -eu
+            test -n "$LAP_DEPLOY_IMAGE"
             cd "${{ vars.DEPLOY_PATH }}"
             echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
             docker compose pull web
-            docker compose up -d web
+            docker compose up -d --no-build web
             sleep 5
             curl --fail --silent http://127.0.0.1:${APP_PORT:-8080}/health/ready

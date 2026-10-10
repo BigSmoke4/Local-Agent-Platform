@@ -2,34 +2,43 @@ using System.Collections.Concurrent;
 
 namespace LocalAgentPlatform.Modules.Agent.Application.Services;
 
-/// <summary>
-/// Tracks a live CancellationTokenSource per running agent session so the "Cancel"
-/// button in the UI can actually stop an in-progress background loop (spec Section 8:
-/// "Support cancellation"). Deliberately a plain in-memory registry — if the process
-/// restarts, in-flight sessions are simply no longer cancellable this way, which is a
-/// real, documented limitation (see docs/STATUS.md), not hidden behavior.
-/// </summary>
+/// <summary>Tracks a single live cancellation source per session. Duplicate queue
+/// deliveries are ignored rather than replacing a source and orphaning cancellation.</summary>
 public sealed class AgentRunRegistry
 {
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _running = new();
 
-    public CancellationTokenSource Register(Guid sessionId)
+    public bool TryRegister(Guid sessionId, out CancellationTokenSource cancellation)
     {
-        var cts = new CancellationTokenSource();
-        _running[sessionId] = cts;
-        return cts;
+        cancellation = new CancellationTokenSource();
+        if (_running.TryAdd(sessionId, cancellation)) return true;
+        cancellation.Dispose();
+        cancellation = null!;
+        return false;
     }
 
-    public void Unregister(Guid sessionId) => _running.TryRemove(sessionId, out _);
+    public CancellationTokenSource Register(Guid sessionId) =>
+        TryRegister(sessionId, out var cancellation)
+            ? cancellation
+            : throw new InvalidOperationException($"Agent session {sessionId} is already running.");
+
+    public void Unregister(Guid sessionId)
+    {
+        if (_running.TryRemove(sessionId, out var cancellation)) cancellation.Dispose();
+    }
 
     public bool RequestCancellation(Guid sessionId)
     {
-        if (_running.TryGetValue(sessionId, out var cts))
+        if (!_running.TryGetValue(sessionId, out var cancellation)) return false;
+        try
         {
-            cts.Cancel();
+            cancellation.Cancel();
             return true;
         }
-        return false;
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
     }
 
     public bool IsRunning(Guid sessionId) => _running.ContainsKey(sessionId);

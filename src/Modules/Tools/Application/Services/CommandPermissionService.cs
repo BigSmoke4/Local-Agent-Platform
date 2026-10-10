@@ -19,6 +19,8 @@ public sealed class CommandPermissionService
 
     public async Task<PersistedCommandDecision> CheckAsync(Guid ownerUserId, string executableName, CancellationToken ct = default)
     {
+        executableName = NormalizeExecutableName(executableName);
+        if (executableName.Length == 0) return PersistedCommandDecision.None;
         var rule = await _db.CommandPermissionRules
             .FirstOrDefaultAsync(r => r.OwnerUserId == ownerUserId && r.ExecutableName == executableName, ct);
 
@@ -32,6 +34,9 @@ public sealed class CommandPermissionService
 
     public async Task SetAsync(Guid ownerUserId, string executableName, PersistedCommandDecision decision, CancellationToken ct = default)
     {
+        executableName = NormalizeExecutableName(executableName);
+        if (decision != PersistedCommandDecision.None && !System.Text.RegularExpressions.Regex.IsMatch(executableName, @"^[a-z0-9_.+-]{1,128}$"))
+            throw new ArgumentException("Executable permission name is invalid.", nameof(executableName));
         var rule = await _db.CommandPermissionRules
             .FirstOrDefaultAsync(r => r.OwnerUserId == ownerUserId && r.ExecutableName == executableName, ct);
 
@@ -63,4 +68,11 @@ public sealed class CommandPermissionService
 
     public Task<List<CommandPermissionRule>> ListAsync(Guid ownerUserId, CancellationToken ct = default) =>
         _db.CommandPermissionRules.Where(r => r.OwnerUserId == ownerUserId).OrderBy(r => r.ExecutableName).ToListAsync(ct);
+
+    private static string NormalizeExecutableName(string? executableName)
+    {
+        var value = executableName?.Trim() ?? string.Empty;
+        if (value.Contains('/') || value.Contains('\\')) return string.Empty;
+        return Path.GetFileNameWithoutExtension(value).ToLowerInvariant();
+    }
 }

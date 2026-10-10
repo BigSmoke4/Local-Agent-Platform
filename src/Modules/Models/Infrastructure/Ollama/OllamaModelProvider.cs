@@ -46,8 +46,8 @@ public sealed class OllamaModelProvider : IModelProvider
             FileSizeBytes: m.Size,
             EstimatedRamBytes: m.Size, // best-effort approximation: on-disk size; true RAM footprint may differ
             EstimatedVramBytes: null,
-            CodingCapability: true,
-            ReasoningCapability: true,
+            CodingCapability: null, // model tags do not declare coding capability
+            ReasoningCapability: null, // model tags do not declare reasoning capability
             ToolCallingCapability: false,
             StreamingCapability: true
         )).ToList();
@@ -108,10 +108,20 @@ public sealed class OllamaModelProvider : IModelProvider
             Text: chunk.Response,
             InputTokens: chunk.PromptEvalCount ?? 0,
             OutputTokens: chunk.EvalCount ?? 0,
-            Duration: sw.Elapsed,
-            TimeToFirstToken: chunk.PromptEvalDurationNs is long ns ? TimeSpan.FromMilliseconds(ns / 1_000_000.0) : null,
+            Duration: chunk.TotalDurationNs is long totalNs
+                ? TimeSpan.FromMilliseconds(totalNs / 1_000_000.0)
+                : sw.Elapsed,
+            // Non-streaming /api/generate does not report time-to-first-token. Prompt
+            // evaluation duration is not the same metric, so leave TTFT unavailable.
+            TimeToFirstToken: null,
             ModelId: request.ModelId,
-            FromCache: false
+            FromCache: false,
+            GenerationDuration: chunk.EvalDurationNs is long evalNs
+                ? TimeSpan.FromMilliseconds(evalNs / 1_000_000.0)
+                : null,
+            PromptProcessingDuration: chunk.PromptEvalDurationNs is long promptNs
+                ? TimeSpan.FromMilliseconds(promptNs / 1_000_000.0)
+                : null
         );
     }
 
@@ -144,7 +154,7 @@ public sealed class OllamaModelProvider : IModelProvider
         await using var stream = await resp.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream, Encoding.UTF8);
 
-        int tokensSoFar = 0;
+        var completed = false;
         while (!reader.EndOfStream && !ct.IsCancellationRequested)
         {
             var line = await reader.ReadLineAsync(ct);
@@ -162,11 +172,16 @@ public sealed class OllamaModelProvider : IModelProvider
             }
             if (chunk is null) continue;
 
-            tokensSoFar += chunk.EvalCount.HasValue ? 0 : 1; // Ollama only reports eval_count on the final line
-            yield return new ModelStreamChunk(chunk.Response, chunk.Done, chunk.EvalCount ?? tokensSoFar);
-
-            if (chunk.Done) yield break;
+            // Stream chunks are text fragments, not tokenizer units. Report an exact token
+            // count only when Ollama supplies its final eval_count; never count chunks as tokens.
+            if (chunk.Done) completed = true;
+            yield return new ModelStreamChunk(chunk.Response, chunk.Done, chunk.Done ? chunk.EvalCount : null);
+            if (completed) break;
         }
+
+        ct.ThrowIfCancellationRequested();
+        if (!completed)
+            throw new InvalidDataException("Ollama streaming ended before a final completion frame was received.");
     }
 
     public async Task<int> CountTokensAsync(string modelId, string text, CancellationToken ct = default)

@@ -22,7 +22,12 @@
             var restoredParams = string.IsNullOrEmpty(paramsJson)
                 ? new Dictionary<string, string>()
                 : System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(paramsJson)!;
-            var hasCommand = restoredParams.ContainsKey("command");
+            var hasCommand = restoredParams.TryGetValue("command", out var commandText);
+            var terminalRisk = Model.Tools.FirstOrDefault(t => string.Equals(t.Name, "TerminalTool", StringComparison.OrdinalIgnoreCase))?.RiskLevel;
+            var canPersistAllow = hasCommand &&
+                LocalAgentPlatform.Modules.Tools.Domain.CommandPolicyEngine.Evaluate(commandText!).CanPersistApproval &&
+                terminalRisk is not null && terminalRisk is not ("High" or "Critical");
+            <div class="panel__row"><span>Requested command</span><code>@(commandText ?? TempData["ToolOutcomeToolName"])</code></div>
             <form method="post" asp-action="Invoke" style="margin-top:0.5rem; display:inline-block;">
                 <input type="hidden" name="toolName" value="@TempData["ToolOutcomeToolName"]" />
                 <input type="hidden" name="repositoryId" value="@TempData["ToolOutcomeRepositoryId"]" />
@@ -35,17 +40,20 @@
             </form>
             @if (hasCommand)
             {
-                <form method="post" asp-action="Invoke" style="margin-top:0.5rem; display:inline-block; margin-left:0.4rem;">
-                    <input type="hidden" name="toolName" value="@TempData["ToolOutcomeToolName"]" />
-                    <input type="hidden" name="repositoryId" value="@TempData["ToolOutcomeRepositoryId"]" />
-                    <input type="hidden" name="approved" value="true" />
-                    <input type="hidden" name="persist" value="AlwaysAllow" />
-                    @foreach (var kv in restoredParams)
-                    {
-                        <input type="hidden" name="@kv.Key" value="@kv.Value" />
-                    }
-                    <button type="submit" class="btn-small">Always Allow this executable</button>
-                </form>
+                @if (canPersistAllow)
+                {
+                    <form method="post" asp-action="Invoke" style="margin-top:0.5rem; display:inline-block; margin-left:0.4rem;">
+                        <input type="hidden" name="toolName" value="@TempData["ToolOutcomeToolName"]" />
+                        <input type="hidden" name="repositoryId" value="@TempData["ToolOutcomeRepositoryId"]" />
+                        <input type="hidden" name="approved" value="true" />
+                        <input type="hidden" name="persist" value="AlwaysAllow" />
+                        @foreach (var kv in restoredParams)
+                        {
+                            <input type="hidden" name="@kv.Key" value="@kv.Value" />
+                        }
+                        <button type="submit" class="btn-small">Always Allow this executable</button>
+                    </form>
+                }
                 <form method="post" asp-action="Invoke" style="margin-top:0.5rem; display:inline-block; margin-left:0.4rem;">
                     <input type="hidden" name="toolName" value="@TempData["ToolOutcomeToolName"]" />
                     <input type="hidden" name="repositoryId" value="@TempData["ToolOutcomeRepositoryId"]" />
@@ -102,6 +110,7 @@
             </div>
             <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.5rem;">
                 <textarea name="content" placeholder="content (FileWriteTool)" rows="2" style="width:100%;"></textarea>
+                <input type="text" name="expectedHash" placeholder="expectedHash (FileEditTool; SHA-256 from FileReadTool, or NEW for FileWriteTool)" style="width:100%;" />
             </div>
             <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.5rem;">
                 <textarea name="oldText" placeholder="oldText (FileEditTool)" rows="2" style="width:49%;"></textarea>
@@ -156,7 +165,7 @@
 <section class="panel">
     <h2 class="panel__title">YOUR PERSISTENT COMMAND PERMISSIONS (Section 11)</h2>
     <p style="font-size:0.75rem; color:var(--text-muted);">
-        Scoped to your account only. The static denylist/dangerous-pattern checks in CommandPolicyEngine always win regardless of an Always-Allow rule here.
+        Scoped to your account only. Always Deny is available from a pending terminal approval. Always Allow is intentionally unavailable while TerminalTool is High risk; every terminal invocation needs its own approval, and existing allow rules cannot clear that gate.
     </p>
     <table class="data-table">
         <thead><tr><th>Executable</th><th>Decision</th><th>Created</th><th></th></tr></thead>
@@ -177,7 +186,7 @@
         }
         @if (!Model.PermissionRules.Any())
         {
-            <tr><td colspan="4">No persistent rules yet — they're created from the "Always Allow/Deny" buttons above when a command needs approval.</td></tr>
+            <tr><td colspan="4">No persistent rules yet. Use “Always Deny” on a pending terminal approval to block an executable for this account.</td></tr>
         }
         </tbody>
     </table>

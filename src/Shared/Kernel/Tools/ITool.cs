@@ -27,7 +27,10 @@ public enum ToolRiskLevel { Low, Medium, High, Critical }
 
 /// <summary>Everything a tool needs about the environment it's running in — never
 /// broader filesystem access than the repository root it's scoped to (Section 38).</summary>
-public sealed record ToolExecutionContext(string RepositoryRootPath, Guid? RepositoryId);
+public sealed record ToolExecutionContext(
+    string RepositoryRootPath,
+    Guid? RepositoryId,
+    bool ApprovalGranted = false);
 
 public sealed record ToolExecutionResult(bool Success, string Output, string? Error, int? ExitCode = null)
 {

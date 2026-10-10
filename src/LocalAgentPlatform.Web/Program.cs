@@ -1,4 +1,6 @@
 using OpenTelemetry.Trace;
+using System.Net;
+using System.Threading.RateLimiting;
 using LocalAgentPlatform.Modules.Models.Application.Services;
 using LocalAgentPlatform.Modules.Models.Infrastructure.Ollama;
 using LocalAgentPlatform.Modules.Models.Infrastructure.Telemetry;
@@ -13,7 +15,9 @@ using LocalAgentPlatform.Modules.Verification.Application.Services;
 using LocalAgentPlatform.Modules.Verification.Infrastructure.Security;
 using LocalAgentPlatform.Shared.Data;
 using LocalAgentPlatform.Shared.Kernel.BackgroundWork;
+using LocalAgentPlatform.Shared.Kernel.Files;
 using LocalAgentPlatform.Shared.Kernel.Models;
+using LocalAgentPlatform.Shared.Kernel.Security;
 using LocalAgentPlatform.Shared.Kernel.Telemetry;
 using LocalAgentPlatform.Shared.Kernel.Tools;
 using LocalAgentPlatform.Web.BackgroundServices;
@@ -22,6 +26,8 @@ using LocalAgentPlatform.Web.Infrastructure;
 using LocalAgentPlatform.Web.Ide;
 using LocalAgentPlatform.Web.Security;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
@@ -35,11 +41,23 @@ builder.Host.UseSerilog((ctx, services, cfg) => cfg
     .WriteTo.Console());
 
 // ---- Configuration ----
+var isDevelopment = builder.Environment.IsDevelopment();
 builder.Services.Configure<OllamaOptions>(builder.Configuration.GetSection(OllamaOptions.SectionName));
+var allowedWorkspaceRoots = builder.Configuration.GetSection("Repositories:AllowedRoots").Get<string[]>() ?? Array.Empty<string>();
+var configurationErrors = ProductionConfigurationPolicy.Validate(
+    isDevelopment,
+    builder.Configuration["AllowedHosts"],
+    builder.Configuration["DataProtection:KeyRingPath"],
+    allowedWorkspaceRoots);
+if (configurationErrors.Count != 0)
+    throw new InvalidOperationException($"Unsafe production configuration: {string.Join(' ', configurationErrors)}");
+var workspaceRootPolicy = new WorkspaceRootPolicy(allowedWorkspaceRoots);
+builder.Services.AddSingleton<IWorkspaceRootPolicy>(workspaceRootPolicy);
 
 // ---- Data layer (PostgreSQL via EF Core) ----
-var connectionString = builder.Configuration.GetConnectionString("PlatformDb")
-    ?? throw new InvalidOperationException("Missing ConnectionStrings:PlatformDb in configuration.");
+var connectionString = builder.Configuration.GetConnectionString("PlatformDb");
+if (string.IsNullOrWhiteSpace(connectionString))
+    throw new InvalidOperationException("Missing ConnectionStrings:PlatformDb. Supply it through a deployment secret or environment variable; no database credential is bundled in appsettings.json.");
 
 builder.Services.AddDbContext<PlatformDbContext>(opts =>
     opts.UseNpgsql(connectionString, npg => npg.EnableRetryOnFailure()));
@@ -67,6 +85,7 @@ builder.Services.AddScoped<IRepositoryContextEngine, RepositoryContextEngine>();
 builder.Services.AddSingleton<ChannelBackgroundTaskQueue>();
 builder.Services.AddSingleton<IBackgroundTaskQueue>(sp => sp.GetRequiredService<ChannelBackgroundTaskQueue>());
 builder.Services.AddHostedService<QueuedHostedService>();
+builder.Services.AddHostedService<PendingAgentSessionRecoveryService>();
 
 // ---- Tool Execution Engine (Phase 4, Sections 10/11) ----
 // Register every concrete tool as ITool; ToolExecutionService discovers them via
@@ -115,11 +134,35 @@ builder.Services.AddControllersWithViews(options =>
 // ---- Authentication: cookie for the MVC UI, API key for /api/* ----
 builder.Services.AddScoped<ApiKeyService>();
 builder.Services.AddSingleton<TotpService>();
-builder.Services.AddDataProtection();
+var dataProtection = builder.Services.AddDataProtection().SetApplicationName("LocalAgentPlatform");
+var dataProtectionKeyPath = builder.Configuration["DataProtection:KeyRingPath"];
+if (!isDevelopment)
+{
+    var writeProbe = Path.Combine(dataProtectionKeyPath!, $".lap-write-probe-{Guid.NewGuid():N}");
+    try
+    {
+        using (new FileStream(writeProbe, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
+        File.Delete(writeProbe);
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+    {
+        try { if (File.Exists(writeProbe)) File.Delete(writeProbe); } catch { /* Keep the config failure as primary. */ }
+        throw new InvalidOperationException("Production DataProtection:KeyRingPath must be writable by the web process.", ex);
+    }
+}
+if (!string.IsNullOrWhiteSpace(dataProtectionKeyPath))
+    dataProtection.PersistKeysToFileSystem(new DirectoryInfo(dataProtectionKeyPath));
 builder.Services
     .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
+        options.Cookie.Name = isDevelopment ? "LocalAgentPlatform.Auth" : "__Host-LocalAgentPlatform.Auth";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SecurePolicy = isDevelopment
+            ? CookieSecurePolicy.SameAsRequest
+            : CookieSecurePolicy.Always;
+        options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.Path = "/";
         options.LoginPath = "/Account/Login";
         options.AccessDeniedPath = "/Account/Login";
         options.ExpireTimeSpan = TimeSpan.FromDays(14);
@@ -130,6 +173,34 @@ builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy("AdminOnly", policy => policy.RequireRole("Admin"));
 });
+
+// Trust forwarded client/protocol headers only from explicitly configured reverse
+// proxies. This keeps IP rate limits and HTTPS cookie behavior meaningful in production
+// without accepting spoofed X-Forwarded-* headers from arbitrary clients.
+var forwardedHeadersEnabled = builder.Configuration.GetValue<bool>("ForwardedHeaders:Enabled");
+var knownProxyAddresses = builder.Configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>() ?? Array.Empty<string>();
+var parsedKnownProxies = new List<IPAddress>();
+if (!isDevelopment && !forwardedHeadersEnabled)
+    throw new InvalidOperationException("Production requires TLS termination at a trusted reverse proxy with ForwardedHeaders:Enabled=true.");
+foreach (var proxy in knownProxyAddresses)
+{
+    if (!IPAddress.TryParse(proxy, out var address))
+        throw new InvalidOperationException($"ForwardedHeaders:KnownProxies contains an invalid IP address: '{proxy}'.");
+    parsedKnownProxies.Add(address);
+}
+if (forwardedHeadersEnabled && parsedKnownProxies.Count == 0)
+    throw new InvalidOperationException("ForwardedHeaders:Enabled requires at least one exact ForwardedHeaders:KnownProxies IP.");
+if (forwardedHeadersEnabled)
+{
+    builder.Services.Configure<ForwardedHeadersOptions>(options =>
+    {
+        options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        options.ForwardLimit = 1;
+        options.KnownProxies.Clear();
+        options.KnownNetworks.Clear();
+        foreach (var proxy in parsedKnownProxies) options.KnownProxies.Add(proxy);
+    });
+}
 
 // ---- SignalR (Phase 8, Section 18/20) ----
 builder.Services.AddSignalR();
@@ -164,15 +235,30 @@ builder.Services.AddSwaggerGen(c =>
     });
 });
 
-// ---- API rate limiting (Phase 11, Section 38) ----
+// ---- API and credential-endpoint rate limiting ----
+// Partition by remote IP so one client cannot consume a process-wide bucket and starve
+// unrelated local users. Authentication endpoints have a deliberately tighter limit.
 builder.Services.AddRateLimiter(options =>
 {
-    options.AddFixedWindowLimiter("api", opt =>
-    {
-        opt.PermitLimit = 60;
-        opt.Window = TimeSpan.FromMinutes(1);
-        opt.QueueLimit = 0;
-    });
+    static string ClientPartition(HttpContext context) =>
+        context.Connection.RemoteIpAddress?.MapToIPv6().ToString() ?? "unknown-client";
+
+    options.AddPolicy("api", context => RateLimitPartition.GetFixedWindowLimiter(
+        ClientPartition(context), _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 60,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+    options.AddPolicy("auth", context => RateLimitPartition.GetFixedWindowLimiter(
+        ClientPartition(context), _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 5,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 });
 
@@ -183,34 +269,45 @@ builder.Services.AddHealthChecks()
 
 // ---- OpenTelemetry (tracing) ----
 builder.Services.AddOpenTelemetry()
-    .WithTracing(tracing => tracing
-        .AddAspNetCoreInstrumentation()
-        .AddHttpClientInstrumentation()
-        .AddConsoleExporter());
+    .WithTracing(tracing =>
+    {
+        tracing.AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation();
+        // Console tracing is intentionally development-only; production deployments
+        // should configure an approved exporter and retention policy explicitly.
+        if (isDevelopment) tracing.AddConsoleExporter();
+    });
 
 var app = builder.Build();
 
-// Apply pending EF Core migrations automatically at startup. Real, idempotent
-// (Migrate() is a no-op if the schema is current) — this is what lets
-// docker-compose bring up a working instance without a manual `dotnet ef
-// database update` step; local dev can still run migrations manually too.
-using (var migrationScope = app.Services.CreateScope())
+// Serialize migrations and startup seeding across replicas. A PostgreSQL session-level
+// advisory lock prevents two new web instances from racing the same DDL/unique inserts.
+using (var startupScope = app.Services.CreateScope())
 {
-    var dbContext = migrationScope.ServiceProvider.GetRequiredService<PlatformDbContext>();
-    var migrations = dbContext.Database.GetMigrations();
-    if (migrations.Any())
-        await dbContext.Database.MigrateAsync();
-    else
-        await dbContext.Database.EnsureCreatedAsync(); // bootstrap a fresh local install even before a baseline migration is committed
+    var dbContext = startupScope.ServiceProvider.GetRequiredService<PlatformDbContext>();
+    var seeder = startupScope.ServiceProvider.GetRequiredService<ToolDefinitionSeeder>();
+    await PostgresStartupLock.ExecuteAsync(dbContext, async startupCt =>
+    {
+        var migrations = dbContext.Database.GetMigrations();
+        if (migrations.Any())
+        {
+            await dbContext.Database.MigrateAsync(startupCt);
+        }
+        else if (app.Environment.IsDevelopment())
+        {
+            await dbContext.Database.EnsureCreatedAsync(startupCt);
+        }
+        else
+        {
+            throw new InvalidOperationException(
+                "No EF Core migrations were found. Refusing to initialize a non-development database with EnsureCreatedAsync.");
+        }
+
+        await seeder.SeedAsync(startupCt);
+    }, app.Lifetime.ApplicationStopping);
 }
 
-// Seed ToolDefinition rows from the real registered ITool instances (Section 21) —
-// runs once at startup so the DB reflects whatever tools are actually wired up.
-using (var scope = app.Services.CreateScope())
-{
-    var seeder = scope.ServiceProvider.GetRequiredService<ToolDefinitionSeeder>();
-    await seeder.SeedAsync();
-}
+if (forwardedHeadersEnabled) app.UseForwardedHeaders();
 
 if (!app.Environment.IsDevelopment())
 {
@@ -225,8 +322,11 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.UseSwagger();
-app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Local Agent Platform API v1"));
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Local Agent Platform API v1"));
+}
 
 app.MapControllerRoute(
     name: "default",

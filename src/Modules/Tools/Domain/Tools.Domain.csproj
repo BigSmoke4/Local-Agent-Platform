@@ -5,4 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>LocalAgentPlatform.Modules.Tools.Domain</RootNamespace>
   </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\Shared\Kernel\Shared.Kernel.csproj" />
+  </ItemGroup>
 </Project>

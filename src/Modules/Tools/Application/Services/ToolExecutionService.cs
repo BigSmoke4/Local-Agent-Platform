@@ -2,6 +2,8 @@ using System.Text.Json;
 using LocalAgentPlatform.Modules.Tools.Domain;
 using LocalAgentPlatform.Shared.Data;
 using LocalAgentPlatform.Shared.Data.Entities;
+using LocalAgentPlatform.Shared.Kernel.Files;
+using LocalAgentPlatform.Shared.Kernel.Security;
 using LocalAgentPlatform.Shared.Kernel.Tools;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -27,14 +29,17 @@ public sealed class ToolExecutionService
     private readonly PlatformDbContext _db;
     private readonly CommandPermissionService _permissions;
     private readonly ILogger<ToolExecutionService> _logger;
+    private readonly IWorkspaceRootPolicy _workspacePolicy;
 
     public ToolExecutionService(
-        IEnumerable<ITool> tools, PlatformDbContext db, CommandPermissionService permissions, ILogger<ToolExecutionService> logger)
+        IEnumerable<ITool> tools, PlatformDbContext db, CommandPermissionService permissions,
+        ILogger<ToolExecutionService> logger, IWorkspaceRootPolicy workspacePolicy)
     {
         _toolsByName = tools.ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
         _db = db;
         _permissions = permissions;
         _logger = logger;
+        _workspacePolicy = workspacePolicy;
     }
 
     public IReadOnlyList<ITool> AllTools => _toolsByName.Values.ToList();
@@ -66,11 +71,15 @@ public sealed class ToolExecutionService
 
         if (ownerUserId is { } callerId && repository.Project?.OwnerUserId != callerId)
             throw new InvalidOperationException("Repository not found or access denied.");
+        if (!_workspacePolicy.IsAllowed(repository.LocalPath))
+            throw new InvalidOperationException("Repository is outside the configured workspace roots.");
 
-        var argumentsJson = JsonSerializer.Serialize(parameters);
+        var argumentsJson = JsonSerializer.Serialize(RedactAuditArguments(toolName, parameters));
 
-        // Tool-level approval gate (e.g. TerminalTool.RiskLevel == High).
-        var needsApproval = tool.RiskLevel == ToolRiskLevel.High || tool.RiskLevel == ToolRiskLevel.Critical;
+        // Tool-level approval is an independent gate. A remembered executable decision
+        // must never clear a tool's High/Critical requirement.
+        var requiresToolApproval = tool.RiskLevel is ToolRiskLevel.High or ToolRiskLevel.Critical;
+        var needsApproval = requiresToolApproval;
         string? decisionReason = null;
 
         // For TerminalTool specifically, also run the real command policy engine on the
@@ -95,14 +104,20 @@ public sealed class ToolExecutionService
             if (ownerUserId is { } uid)
             {
                 var executable = CommandPolicyEngine.ExtractExecutable(command);
-                var persisted = await _permissions.CheckAsync(uid, executable, ct);
+                var persisted = string.IsNullOrEmpty(executable)
+                    ? PersistedCommandDecision.None
+                    : await _permissions.CheckAsync(uid, executable, ct);
 
                 if (persisted == PersistedCommandDecision.AlwaysDeny)
                 {
                     return await RecordAndReturnAsync(toolName, repositoryId, repository.LocalPath, argumentsJson,
                         "Denied", $"Denied by your persistent Always-Deny rule for '{executable}'.", null, ct, ownerUserId);
                 }
-                if (persisted == PersistedCommandDecision.AlwaysAllow)
+                // An Always-Allow rule can suppress only an ordinary unknown-executable
+                // approval. Dangerous-pattern and destructive-git approvals always need
+                // a fresh, one-time human decision.
+                if (persisted == PersistedCommandDecision.AlwaysAllow &&
+                    policyResult.CanPersistApproval && !requiresToolApproval)
                 {
                     needsApproval = false;
                     decisionReason = $"Allowed by your persistent Always-Allow rule for '{executable}'.";
@@ -118,7 +133,11 @@ public sealed class ToolExecutionService
 
         var decision = "Allowed";
 
-        var context = new ToolExecutionContext(repository.LocalPath, repositoryId);
+        var policyRequiresApproval = tool.Name.Equals("TerminalTool", StringComparison.OrdinalIgnoreCase) &&
+            parameters.TryGetValue("command", out var requestedCommand) &&
+            CommandPolicyEngine.Evaluate(requestedCommand).Decision == CommandDecision.RequireApproval;
+        var commandApprovalGranted = approved || (policyRequiresApproval && !needsApproval);
+        var context = new ToolExecutionContext(repository.LocalPath, repositoryId, commandApprovalGranted);
         ToolExecutionResult result;
 
         try
@@ -126,6 +145,13 @@ public sealed class ToolExecutionService
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(tool.Timeout);
             result = await tool.ExecuteAsync(parameters, context, timeoutCts.Token);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await RecordAndReturnAsync(toolName, repositoryId, repository.LocalPath, argumentsJson,
+                "Cancelled", "Tool execution cancelled by caller.", ToolExecutionResult.Fail("Cancelled."),
+                CancellationToken.None, ownerUserId);
+            throw;
         }
         catch (OperationCanceledException)
         {
@@ -154,8 +180,8 @@ public sealed class ToolExecutionService
             Decision = decision,
             DecisionReason = decisionReason,
             Success = result?.Success,
-            Output = Truncate(result?.Output),
-            Error = Truncate(result?.Error),
+            Output = Truncate(RedactAuditOutput(toolName, result?.Output)),
+            Error = Truncate(RedactSecrets(result?.Error)),
             ExitCode = result?.ExitCode,
             CompletedAtUtc = result is not null ? DateTimeOffset.UtcNow : null
         };
@@ -164,6 +190,42 @@ public sealed class ToolExecutionService
 
         return new ToolInvocationOutcome(entity.Id, decision, decisionReason, result);
     }
+
+    private static IReadOnlyDictionary<string, string> RedactAuditArguments(
+        string toolName, IReadOnlyDictionary<string, string> parameters)
+    {
+        var redacted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, value) in parameters)
+        {
+            var safeValue = value ?? string.Empty;
+            // The task/session store carries the data needed for execution; the separate
+            // audit row should record which file was touched, not duplicate source text.
+            if (toolName.Equals("FileWriteTool", StringComparison.OrdinalIgnoreCase) ||
+                toolName.Equals("FileEditTool", StringComparison.OrdinalIgnoreCase))
+            {
+                if (key.Equals("content", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("oldText", StringComparison.OrdinalIgnoreCase) ||
+                    key.Equals("newText", StringComparison.OrdinalIgnoreCase))
+                {
+                    redacted[key] = $"[omitted; {safeValue.Length} characters]";
+                    continue;
+                }
+            }
+            redacted[key] = RedactSecrets(safeValue) ?? string.Empty;
+        }
+        return redacted;
+    }
+
+    private static string? RedactAuditOutput(string toolName, string? output)
+    {
+        if (output is null) return null;
+        if (toolName.Equals("FileReadTool", StringComparison.OrdinalIgnoreCase))
+            return $"[file contents omitted from audit; {output.Length} characters returned to the agent]";
+        return RedactSecrets(output);
+    }
+
+    private static string? RedactSecrets(string? text) =>
+        text is null ? null : SecretRedactor.Redact(text);
 
     private static string? Truncate(string? s) => s is { Length: > 20_000 } ? s[..20_000] + "\n... [truncated]" : s;
 }
